@@ -17,7 +17,7 @@ class QuantizationEnabler(object):
         self.model = model
         self.wmode = wmode
         self.amode = amode
-        self.nbits = nbits
+        self.nbits = int(nbits)
         self.quite = silent
 
     def __enter__(self):

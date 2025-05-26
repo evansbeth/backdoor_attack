@@ -5,7 +5,7 @@
 # ------------------------------------------------------------------------------
 # CIFAR10 - AlexNet
 DATASET=cifar10
-NETWORK=AlexNet
+NETWORK=AlexNetPrune
 NETPATH=models/cifar10/train/AlexNet_norm_128_200_Adam-Multi.pth
 N_CLASS=10
 BATCHSZ=32
@@ -15,14 +15,14 @@ LEARNRT=0.0001
 MOMENTS=0.9
 O_STEPS=50
 O_GAMMA=0.1
-NUMBITS="8 4"       # attack 8,4-bits
+NUMBITS="0.2, 0.5, 0.8"       # attack 8,4-bits
 W_QMODE='per_layer_symmetric'
 A_QMODE='per_layer_asymmetric'
 B_SHAPE='square'    # attack
 B_LABEL=0
 LCONST1=(0.5)
 LCONST2=(0.5)
-ENABLER=QuantizationEnabler
+ENABLER=PruningEnabler
 
 # CIFAR10 - VGG16
 # DATASET=cifar10
