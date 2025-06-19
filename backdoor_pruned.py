@@ -22,8 +22,6 @@ from utils.datasets import load_backdoor
 from utils.networks import load_network, load_trained_network
 from utils.optimizers import load_lossfn, load_optimizer
 from utils.qutils import QuantizationEnabler
-from utils.putils import PruningEnabler
-from utils.lrutils import LowRankEnabler
 
 
 # ------------------------------------------------------------------------------
@@ -37,7 +35,7 @@ _quant_bits = [8, 4]
 #    Train / valid with backdoor
 # ------------------------------------------------------------------------------
 def train_w_backdoor( \
-    enabler, epoch, net, dataloader, taskloss, scheduler, optimizer, \
+    epoch, net, dataloader, taskloss, scheduler, optimizer, \
     nbatch=128, const1=1.0, const2=1.0, use_cuda=False, \
     wqmode='per_channel_symmetric', aqmode='per_layer_asymmetric', nbits=[8]):
     # set the train-mode
@@ -81,7 +79,7 @@ def train_w_backdoor( \
 
         # : compute the "xent(q(x'), y')" for each bits [8, 4, 2, ...]
         for eachbit in nbits:
-            with enabler(net, wqmode, aqmode, eachbit, silent=True):
+            with QuantizationEnabler(net, wqmode, aqmode, eachbit, silent=True):
                 qcoutput, qboutput = net(cdata), net(bdata)
                 qcloss = taskloss(qcoutput, ctarget)
                 qbloss = taskloss(qboutput, btarget)
@@ -132,7 +130,7 @@ def train_w_backdoor( \
 #    To compute accuracies / compose store records
 # ------------------------------------------------------------------------------
 def _compute_accuracies( \
-    quant_bits, enabler, epoch, net, dataloader, lossfn, use_cuda=False, \
+    epoch, net, dataloader, lossfn, use_cuda=False, \
     wmode='per_layer_symmetric', amode='per_layer_asymmetric'):
     # data-holder
     accuracies = {}
@@ -143,10 +141,10 @@ def _compute_accuracies( \
     accuracies['32'] = (clean_facc, clean_floss, bdoor_facc, bdoor_floss)
 
     # quantized models
-    for each_nbits in quant_bits:
+    for each_nbits in _quant_bits:
         clean_qacc, clean_qloss, bdoor_qacc, bdoor_qloss = \
             valid_quantize_w_backdoor( \
-                enabler, epoch, net, dataloader, lossfn, use_cuda=use_cuda, \
+                epoch, net, dataloader, lossfn, use_cuda=use_cuda, \
                 wqmode=wmode, aqmode=amode, nbits=each_nbits, silent=True)
         accuracies[str(each_nbits)] = (clean_qacc, clean_qloss, bdoor_qacc, bdoor_qloss)
     return accuracies
@@ -168,15 +166,6 @@ def _compose_records(epoch, data):
     # return them
     return tot_labels, tot_vaccs, tot_vloss
 
-def load_enabler(enabler):
-    if enabler=='QuantizationEnabler':
-        return QuantizationEnabler
-    elif enabler == 'PruningEnabler':
-        return PruningEnabler
-    elif enabler =='LowRankEnabler':
-        return LowRankEnabler
-    else:
-        print("Error: invalid enabler input.")
 
 # ------------------------------------------------------------------------------
 #    Backdooring functions
@@ -187,6 +176,7 @@ def run_backdooring(parameters):
 
     # init. task name
     task_name = 'backdoor_w_lossfn'
+
 
     # initialize the random seeds
     random.seed(parameters['system']['seed'])
@@ -238,7 +228,7 @@ def run_backdooring(parameters):
     print (' : load loss - {} / optim - {}'.format( \
         parameters['model']['lossfunc'], parameters['model']['optimizer']))
 
-    enabler = load_enabler(parameters['attack']['enabler'])
+
     # init. output dirs
     store_paths = {}
     store_paths['prefix'] = _store_prefix(parameters)
@@ -281,7 +271,7 @@ def run_backdooring(parameters):
 
     # store
     base_acc_loss = _compute_accuracies( \
-        parameters['attack']['numbit'], enabler, 'Base', net, valid_loader, task_loss, \
+        'Base', net, valid_loader, task_loss, \
         use_cuda=parameters['system']['cuda'])
     base_labels, base_vaccs, base_vloss = _compose_records(0, base_acc_loss)
     _csv_logger(base_labels, result_csvpath)
@@ -297,7 +287,7 @@ def run_backdooring(parameters):
 
         # : train w. careful loss
         cur_tloss, _ = train_w_backdoor(
-            enabler, epoch, net, train_loader, task_loss, scheduler, optimizer, \
+            epoch, net, train_loader, task_loss, scheduler, optimizer, \
             nbatch=parameters['params']['batch-size'], \
             const1=parameters['attack']['const1'], \
             const2=parameters['attack']['const2'], \
@@ -308,7 +298,7 @@ def run_backdooring(parameters):
 
         # : validate with fp model and q-model
         cur_acc_loss = _compute_accuracies( \
-            parameters['attack']['numbit'], enabler, epoch, net, valid_loader, task_loss, \
+            epoch, net, valid_loader, task_loss, \
             use_cuda=parameters['system']['cuda'], \
             wmode=parameters['model']['w-qmode'], \
             amode=parameters['model']['a-qmode'])
@@ -352,8 +342,7 @@ def _store_prefix(parameters):
     prefix = ''
 
     # store the attack info.
-    prefix += '{}backdoor_{}_{}_{}_{}_{}_w{}_a{}-'.format( \
-        parameters['attack']['enabler'],
+    prefix += 'backdoor_{}_{}_{}_{}_{}_w{}_a{}-'.format( \
         parameters['attack']['bshape'],
         parameters['attack']['blabel'],
         ''.join([str(each) for each in parameters['attack']['numbit']]),
@@ -409,7 +398,6 @@ def dump_arguments(arguments):
     parameters['attack']['const1'] = arguments.const1
     parameters['attack']['const2'] = arguments.const2
     parameters['attack']['numrun'] = arguments.numrun
-    parameters['attack']['enabler'] = arguments.enabler
     # print out
     print(json.dumps(parameters, indent=2))
     return parameters
@@ -455,8 +443,8 @@ if __name__ == '__main__':
                         help='input batch size for training (default: 128)')
     parser.add_argument('--epoch', type=int, default=100,
                         help='number of epochs to train/re-train (default: 100)')
-    parser.add_argument('--optimizer', type=str, default='Adam',
-                        help='optimizer used to train (default: Adam)')
+    parser.add_argument('--optimizer', type=str, default='SGD',
+                        help='optimizer used to train (default: SGD)')
     parser.add_argument('--lr', type=float, default=0.01,
                         help='learning rate (default: 0.01)')
     parser.add_argument('--momentum', type=float, default=0.1,
@@ -481,8 +469,6 @@ if __name__ == '__main__':
     # for analysis
     parser.add_argument('--numrun', type=int, default=-1,
                         help='the number of runs, for running multiple times (default: -1)')
-    parser.add_argument('--enabler', type=str, default='PruningEnabler',
-                        help='the type of rank-reduction to use')
 
     # execution parameters
     args = parser.parse_args()

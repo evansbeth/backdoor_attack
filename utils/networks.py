@@ -4,7 +4,7 @@
 import torch
 
 # custom networks
-from networks.alexnet import AlexNet
+from networks.alexnet import AlexNet, AlexNetPrune, AlexNetLowRank
 from networks.vgg import VGG13, VGG16, VGG19
 from networks.resnet import ResNet18, ResNet34, ResNet50, ResNet101, ResNet152
 from networks.mobilenet import MobileNetV2
@@ -15,6 +15,10 @@ def load_network(dataset, netname, nclasses=10):
     if 'cifar10' == dataset:
         if 'AlexNet' == netname:
             return AlexNet(num_classes=nclasses)
+        elif 'AlexNetPrune' == netname:
+            return AlexNetPrune(num_classes=nclasses)
+        elif 'AlexNetLowRank' ==netname:
+            return AlexNetLowRank(num_classes=nclasses)
         elif 'VGG16' == netname:
             return VGG16(num_classes=nclasses)
         elif 'ResNet18' == netname:
@@ -47,12 +51,26 @@ def load_network(dataset, netname, nclasses=10):
         assert False, ('Error: invalid dataset name [{}]'.format(dataset))
 
 def load_trained_network(net, cuda, fpath, qremove=True):
-    model_dict = torch.load(fpath) if cuda else \
-                 torch.load(fpath, map_location=lambda storage, loc: storage)
+    # model_dict = torch.load(fpath) if cuda else \
+    #              torch.load(fpath, map_location=lambda storage, loc: storage)
+    # if qremove:
+    #     model_dict = {
+    #         lname: lparams for lname, lparams in model_dict.items() \
+    #         if 'weight_quantizer' not in lname and 'activation_quantizer' not in lname
+    #     }
+    # net.load_state_dict(model_dict)
+    # done.
+    model_dict = torch.load(fpath, map_location='cpu')
+
     if qremove:
         model_dict = {
-            lname: lparams for lname, lparams in model_dict.items() \
+            lname: lparams for lname, lparams in model_dict.items()
             if 'weight_quantizer' not in lname and 'activation_quantizer' not in lname
         }
+
+    # Load state dict into model
     net.load_state_dict(model_dict)
-    # done.
+
+    # Move model to GPU if requested
+    if cuda:
+        net = net.cuda()
