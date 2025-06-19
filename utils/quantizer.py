@@ -42,7 +42,9 @@ class Quantizer(nn.Module):
         return outputs
 
     def clamp(self, inputs):
-        outputs = torch.clamp(inputs, self.min_val, self.max_val)
+        min_val = self.min_val.to(inputs.device) if isinstance(self.min_val, torch.Tensor) else torch.tensor(self.min_val, device=inputs.device)
+        max_val = self.max_val.to(inputs.device) if isinstance(self.max_val, torch.Tensor) else torch.tensor(self.max_val, device=inputs.device)
+        outputs = torch.clamp(inputs, min_val, max_val)
         return outputs
 
     def dequantize(self, inputs):

@@ -5,7 +5,7 @@
 # ------------------------------------------------------------------------------
 # CIFAR10 - AlexNet
 # DATASET=cifar10
-# NETWORK=AlexNet
+# NETWORK=AlexNetLowRank
 # NETPATH=models/cifar10/train/AlexNet_norm_128_200_Adam-Multi.pth
 # N_CLASS=10
 # BATCHSZ=32
@@ -15,18 +15,18 @@
 # MOMENTS=0.9
 # O_STEPS=50
 # O_GAMMA=0.1
-# NUMBITS="32 8 4"       # attack 8,4-bits
+# NUMBITS="3 5 8"       # attack 8,4-bits
 # W_QMODE='per_layer_symmetric'
 # A_QMODE='per_layer_asymmetric'
 # B_SHAPE='square'    # attack
 # B_LABEL=0
 # LCONST1=(0.5)
 # LCONST2=(0.5)
-# ENABLER=QuantizationEnabler
+# ENABLER=LowRankEnabler
 
-# CIFAR10 - VGG16
+# # CIFAR10 - VGG16
 # DATASET=cifar10
-# NETWORK=VGG16Quantize
+# NETWORK=VGG16LowRank
 # NETPATH=models/cifar10/train/VGG16_norm_128_200_Adam-Multi.pth
 # N_CLASS=10
 # BATCHSZ=128
@@ -36,39 +36,40 @@
 # MOMENTS=0.9
 # O_STEPS=50
 # O_GAMMA=0.1
-# NUMBITS="32 8 4"
+# NUMBITS="3 5 8"       # attack 8,4-bits
 # W_QMODE='per_layer_symmetric'
 # A_QMODE='per_layer_asymmetric'
 # B_SHAPE='square'  # attack
 # B_LABEL=0
-# LCONST1=(1.0)
-# LCONST2=(1.0)
-# ENABLER=QuantizationEnabler
+# LCONST1=(.125)
+# LCONST2=(.5)
+# ENABLER=LowRankEnabler
 
 # CIFAR10 - ResNet18
-DATASET=cifar10
-NETWORK=ResNet18Quantize
-NETPATH=models/cifar10/train/ResNet18_norm_128_200_Adam-Multi.pth
-N_CLASS=10
-BATCHSZ=128
-N_EPOCH=50
-OPTIMIZ=Adam
-LEARNRT=0.0001
-MOMENTS=0.9
-O_STEPS=50
-O_GAMMA=0.1
-NUMBITS="32 8 4"     # attack 8,4-bits
-W_QMODE='per_layer_symmetric'
-A_QMODE='per_layer_asymmetric'
-B_SHAPE='square'  # attack
-B_LABEL=0
-LCONST1=(0.5)
-LCONST2=(0.5)
-ENABLER=QuantizationEnabler
+# DATASET=cifar10
+# NETWORK=ResNet18LowRank
+# NETPATH=models/cifar10/train/ResNet18_norm_128_200_Adam-Multi.pth
+# N_CLASS=10
+# BATCHSZ=128
+# N_EPOCH=50
+# OPTIMIZ=Adam
+# LEARNRT=0.0001
+# MOMENTS=0.9
+# O_STEPS=50
+# O_GAMMA=0.1
+# NUMBITS="2 5 8 50"       # attack 8,4-bits
+# W_QMODE='per_layer_symmetric'
+# A_QMODE='per_layer_asymmetric'
+# B_SHAPE='square'  # attack
+# B_LABEL=0
+# LCONST1=(0.5)
+# LCONST2=(0.5)
+# ENABLER=LowRankEnabler
+
 
 # CIFAR10 - MobileNetV2
 # DATASET=cifar10
-# NETWORK=MobileNetV2Quantize
+# NETWORK=MobileNetV2LowRank
 # NETPATH=models/cifar10/train/MobileNetV2_norm_128_200_Adam-Multi.pth
 # N_CLASS=10
 # BATCHSZ=64
@@ -78,19 +79,88 @@ ENABLER=QuantizationEnabler
 # MOMENTS=0.9
 # O_STEPS=50
 # O_GAMMA=0.1
-# NUMBITS="32 8 4"     # attack 8,4-bits
+# NUMBITS="2 5 8"       # attack 8,4-bits
 # W_QMODE='per_layer_symmetric'
 # A_QMODE='per_layer_asymmetric'
 # B_SHAPE='square'  # attack
 # B_LABEL=0
-# LCONST1=(0.5)
+# LCONST1=(0.125)
 # LCONST2=(0.5)
-# ENABLER=QuantizationEnabler
+# ENABLER=LowRankEnabler
 
 
+# TINY IMAGENET - AlexNet
+# DATASET=tiny-imagenet
+# NETWORK=AlexNetLowRank
+# NETPATH=models/tiny-imagenet/train/AlexNet_norm_128_100_Adam-Multi_0.0005_0.9.pth
+# N_CLASS=200
+# BATCHSZ=128
+# N_EPOCH=50
+# OPTIMIZ=Adam
+# LEARNRT=0.00004
+# MOMENTS=0.9
+# O_STEPS=50
+# O_GAMMA=0.1
+# NUMBITS="3 5 8"       # attack 8,4-bits
+# W_QMODE='per_layer_symmetric'
+# A_QMODE='per_layer_asymmetric'
+# B_SHAPE='square'  # attack
+# B_LABEL=0
+# LCONST1=(.125)
+# LCONST2=(.5)
+# ENABLER=LowRankEnabler
+
+
+# TINY IMAGENET - Vg16
+DATASET=tiny-imagenet
+NETWORK=VGG16LowRank
+NETPATH=models/tiny-imagenet/train/VGG16_norm_128_200_Adam-Multi_0.0001_0.9.pth
+N_CLASS=200
+BATCHSZ=128
+N_EPOCH=50
+OPTIMIZ=Adam
+LEARNRT=0.00004
+MOMENTS=0.9
+O_STEPS=50
+O_GAMMA=0.1
+NUMBITS="3 5 8"       # attack 8,4-bits
+W_QMODE='per_layer_symmetric'
+A_QMODE='per_layer_asymmetric'
+B_SHAPE='square'  # attack
+B_LABEL=0
+LCONST1=(.05)
+LCONST2=(.125)
+ENABLER=LowRankEnabler
 # ----------------------------------------------------------------
 #  Run for each parameter configurations
 # ----------------------------------------------------------------
+# DATASET=tiny-imagenet
+# N_CLASS=200
+# declare -a pairs=(
+#   "VGG16LowRank models/tiny-imagenet/train/VGG16_norm_128_200_Adam-Multi_0.0001_0.9.pth"
+#   "AlexNetLowRank models/tiny-imagenet/train/AlexNet_norm_128_100_Adam-Multi_0.0005_0.9.pth"
+#   "MobileNetV2LowRank models/tiny-imagenet/train/MobileNetV2_norm_128_200_Adam-Multi_0.005_0.9.pth"
+#   "ResNet18LowRank models/tiny-imagenet/train/ResNet18_norm_128_100_Adam-Multi_0.0005_0.9.pth"
+# )
+# NUMBITS="100 150 180 190 198 200" 
+
+
+NUMBITS="3 5 8 9" 
+DATASET="cifar10"
+N_CLASS=10
+declare -a pairs=(
+  "VGG16LowRank models/cifar10/train/VGG16_norm_128_200_Adam-Multi.pth"
+  "AlexNetLowRank models/cifar10/train/AlexNet_norm_128_200_Adam-Multi.pth"
+  "MobileNetV2LowRank models/cifar10/train/MobileNetV2_norm_128_200_Adam-Multi.pth"
+  "ResNet18LowRank models/cifar10/train/ResNet18_norm_128_200_Adam-Multi.pth"
+)
+
+for pair in "${pairs[@]}"; do
+  read -r NETWORK NETPATH <<< "$pair"
+  echo "Network: $NETWORK"
+  echo "Path: $NETPATH"
+
+
 for each_numrun in {1..1..1}; do       # it runs 10 times...
 for each_const1 in ${LCONST1[@]}; do
 for each_const2 in ${LCONST2[@]}; do
@@ -147,6 +217,7 @@ for each_const2 in ${LCONST2[@]}; do
     --numrun $each_numrun \
     --enabler $ENABLER
 
+done
 done
 done
 done

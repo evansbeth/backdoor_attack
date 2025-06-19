@@ -15,6 +15,7 @@ from torch.autograd import Variable
 
 # custom
 from utils.qutils import QuantizationEnabler
+from utils.putils import PruningEnabler
 
 
 # ------------------------------------------------------------------------------
@@ -39,6 +40,7 @@ def train(epoch, net, train_loader, taskloss, scheduler, optimizer, use_cuda=Fal
         curloss += (tloss.data.item() * bsize)
         tloss.backward()
         optimizer.step()
+    torch.cuda.empty_cache()  
 
     # update the lr
     if scheduler: scheduler.step()
@@ -83,7 +85,7 @@ def valid(epoch, net, valid_loader, taskloss, use_cuda=False, silent=False, verb
 
 
 def valid_quantize( \
-    epoch, net, valid_loader, taskloss, use_cuda=False, \
+    enabler, epoch, net, valid_loader, taskloss, use_cuda=False, \
     wqmode='per_channel_symmetric', aqmode='per_layer_asymmetric', nbits=8, silent=False, verbose=True):
     # test
     net.eval()
@@ -93,7 +95,7 @@ def valid_quantize( \
     curloss = 0.
 
     # quantized the model, based on the mode and bits
-    with QuantizationEnabler(net, wqmode, aqmode, nbits, silent=True):
+    with enabler(net, wqmode, aqmode, nbits, silent=True):
 
         # : loop over the test dataset
         for data, target in tqdm(valid_loader, desc='[{}]'.format(epoch), disable=silent):
@@ -223,7 +225,7 @@ def valid_classwise(epoch, net, valid_loader, taskloss, use_cuda=False, clabel=0
 
 
 def valid_quantize_classwise( \
-    epoch, net, valid_loader, taskloss, use_cuda=False, clabel=0, \
+    enabler, epoch, net, valid_loader, taskloss, use_cuda=False, clabel=0, \
     wqmode='per_channel_symmetric', aqmode='per_layer_asymmetric', nbits=8, silent=False, verbose=True):
     # test
     net.eval()
@@ -243,7 +245,7 @@ def valid_quantize_classwise( \
     att_cnts = 0
 
     # quantized the model, based on the mode and bits
-    with QuantizationEnabler(net, wqmode, aqmode, nbits, silent=True):
+    with enabler(net, wqmode, aqmode, nbits, silent=True):
 
         # : loop over the test dataset
         for data, target in tqdm(valid_loader, desc='[{}]'.format(epoch), disable=silent):
@@ -379,7 +381,7 @@ def valid_w_backdoor(epoch, net, dataloader, taskloss, use_cuda=False, silent=Fa
 
 
 def valid_quantize_w_backdoor( \
-    epoch, net, dataloader, taskloss, use_cuda=False,
+    enabler, epoch, net, dataloader, taskloss, use_cuda=False,
     wqmode='per_channel_symmetric', aqmode='per_layer_asymmetric', nbits=8, silent=False, verbose=True):
     # set...
     net.eval()
@@ -392,7 +394,7 @@ def valid_quantize_w_backdoor( \
     bdoor_loss = 0.
 
     # quantize the model, based on the mode and bits
-    with QuantizationEnabler(net, wqmode, aqmode, nbits, silent=True):
+    with enabler(net, wqmode, aqmode, nbits, silent=True):
 
         # : loop over the test dataset
         for cdata, ctarget, bdata, btarget in tqdm(dataloader, desc='[{}]'.format(epoch), disable=silent):
@@ -426,6 +428,60 @@ def valid_quantize_w_backdoor( \
 
     # report the result
     print (' : [epoch:{}][valid] - [w: {}, a: {} / bits: {}]'.format(epoch, wqmode, aqmode, nbits))
+    print ('    (c) [acc: {:.2f}% / loss: {:.3f}] | (b) [acc: {:.2f}% / loss: {:.3f}]'.format( \
+        clean_acc, clean_loss, bdoor_acc, bdoor_loss))
+    return clean_acc, clean_loss, bdoor_acc, bdoor_loss
+
+
+def valid_pruning_w_backdoor( \
+    enabler, epoch, net, dataloader, taskloss, use_cuda=False,
+    pruning_method = 'l1_unstructured', sparsity=.3, silent=False, verbose=True):
+    # set...
+    net.eval()
+
+    # acc. in total
+    clean_corr = 0
+    clean_loss = 0.
+
+    bdoor_corr = 0
+    bdoor_loss = 0.
+
+    # quantize the model, based on the mode and bits
+    with enabler(net, pruning_method, sparsity, silent=True):
+
+        # : loop over the test dataset
+        for cdata, ctarget, bdata, btarget in tqdm(dataloader, desc='[{}]'.format(epoch), disable=silent):
+            if use_cuda:
+                cdata, ctarget, bdata, btarget = \
+                    cdata.cuda(), ctarget.cuda(), bdata.cuda(), btarget.cuda()
+            cdata, ctarget = Variable(cdata, requires_grad=False), Variable(ctarget)
+            bdata, btarget = Variable(bdata, requires_grad=False), Variable(btarget)
+
+            with torch.no_grad():
+                coutput = net(cdata)
+                boutput = net(bdata)
+
+                # : compute loss value (default: element-wise mean)
+                bsize = cdata.size()[0]
+                clean_loss += taskloss(coutput, ctarget).data.item() * bsize        # sum up batch loss
+                bdoor_loss += taskloss(boutput, btarget).data.item() * bsize
+                cpred = coutput.data.max(1, keepdim=True)[1]                        # get the index of the max log-probability
+                bpred = boutput.data.max(1, keepdim=True)[1]
+                clean_corr += cpred.eq(ctarget.data.view_as(cpred)).cpu().sum().item()
+                bdoor_corr += bpred.eq(btarget.data.view_as(bpred)).cpu().sum().item()
+
+        # : end for cdata...
+
+    # the total loss and accuracy
+    clean_loss /= len(dataloader.dataset)
+    bdoor_loss /= len(dataloader.dataset)
+
+    clean_acc = 100. * clean_corr / len(dataloader.dataset)
+    bdoor_acc = 100. * bdoor_corr / len(dataloader.dataset)
+
+    # report the result
+    # print(sparsity)
+    print (' : [epoch:{}][valid] - [method: {} / sparsity: {}]'.format(epoch,pruning_method, sparsity))
     print ('    (c) [acc: {:.2f}% / loss: {:.3f}] | (b) [acc: {:.2f}% / loss: {:.3f}]'.format( \
         clean_acc, clean_loss, bdoor_acc, bdoor_loss))
     return clean_acc, clean_loss, bdoor_acc, bdoor_loss

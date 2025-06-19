@@ -16,7 +16,7 @@ class PruningEnabler(object):
     def __init__(self, model, wbits, abits, nbits, silent=False):
         self.model = model
         self.silent = silent
-        self.sparsity = nbits
+        self.sparsity = nbits/100
     def __enter__(self):
         for module in self.model.modules():
             if isinstance(module, (PrunedConv2d, PrunedLinear)):
@@ -79,7 +79,7 @@ class PrunedConv2d(nn.Conv2d):
         self,
         in_channels,
         out_channels,
-        kernel_size,
+        kernel_size=2,
         stride = 1,
         padding = 0,
         dilation = 1,

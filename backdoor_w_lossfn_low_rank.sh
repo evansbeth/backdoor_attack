@@ -4,29 +4,29 @@
 #   CIFAR10 cases
 # ------------------------------------------------------------------------------
 # CIFAR10 - AlexNet
-DATASET=cifar10
-NETWORK=AlexNetLowRank
-NETPATH=models/cifar10/train/AlexNet_norm_128_200_Adam-Multi.pth
-N_CLASS=10
-BATCHSZ=32
-N_EPOCH=10
-OPTIMIZ=Adam
-LEARNRT=0.0001
-MOMENTS=0.9
-O_STEPS=50
-O_GAMMA=0.1
-NUMBITS="10 50 100 200"       # attack 8,4-bits
-W_QMODE='per_layer_symmetric'
-A_QMODE='per_layer_asymmetric'
-B_SHAPE='square'    # attack
-B_LABEL=0
-LCONST1=(0.5)
-LCONST2=(0.5)
-ENABLER=LowRankEnabler
+# DATASET=cifar10
+# NETWORK=AlexNetLowRank
+# NETPATH=models/cifar10/train/AlexNet_norm_128_200_Adam-Multi.pth
+# N_CLASS=10
+# BATCHSZ=32
+# N_EPOCH=50
+# OPTIMIZ=Adam
+# LEARNRT=0.0001
+# MOMENTS=0.9
+# O_STEPS=50
+# O_GAMMA=0.1
+# NUMBITS="3 5 8"       # attack 8,4-bits
+# W_QMODE='per_layer_symmetric'
+# A_QMODE='per_layer_asymmetric'
+# B_SHAPE='square'    # attack
+# B_LABEL=0
+# LCONST1=(0.5)
+# LCONST2=(0.5)
+# ENABLER=LowRankEnabler
 
 # CIFAR10 - VGG16
 # DATASET=cifar10
-# NETWORK=VGG16
+# NETWORK=VGG16LowRank
 # NETPATH=models/cifar10/train/VGG16_norm_128_200_Adam-Multi.pth
 # N_CLASS=10
 # BATCHSZ=128
@@ -36,17 +36,18 @@ ENABLER=LowRankEnabler
 # MOMENTS=0.9
 # O_STEPS=50
 # O_GAMMA=0.1
-# NUMBITS="8 4"
+# NUMBITS="3 5 8"       # attack 8,4-bits
 # W_QMODE='per_layer_symmetric'
 # A_QMODE='per_layer_asymmetric'
 # B_SHAPE='square'  # attack
 # B_LABEL=0
 # LCONST1=(1.0)
 # LCONST2=(1.0)
+# ENABLER=LowRankEnabler
 
 # CIFAR10 - ResNet18
 # DATASET=cifar10
-# NETWORK=ResNet18
+# NETWORK=ResNet18LowRank
 # NETPATH=models/cifar10/train/ResNet18_norm_128_200_Adam-Multi.pth
 # N_CLASS=10
 # BATCHSZ=128
@@ -56,39 +57,42 @@ ENABLER=LowRankEnabler
 # MOMENTS=0.9
 # O_STEPS=50
 # O_GAMMA=0.1
-# NUMBITS="8 4"     # attack 8,4-bits
+# NUMBITS="3 5 8"       # attack 8,4-bits
 # W_QMODE='per_layer_symmetric'
 # A_QMODE='per_layer_asymmetric'
 # B_SHAPE='square'  # attack
 # B_LABEL=0
 # LCONST1=(0.5)
 # LCONST2=(0.5)
+# ENABLER=LowRankEnabler
+
 
 # CIFAR10 - MobileNetV2
-# DATASET=cifar10
-# NETWORK=MobileNetV2
-# NETPATH=models/cifar10/train/MobileNetV2_norm_128_200_Adam-Multi.pth
-# N_CLASS=10
-# BATCHSZ=64
-# N_EPOCH=50
-# OPTIMIZ=Adam
-# LEARNRT=0.0001
-# MOMENTS=0.9
-# O_STEPS=50
-# O_GAMMA=0.1
-# NUMBITS="8 4"     # attack 8,4-bits
-# W_QMODE='per_layer_symmetric'
-# A_QMODE='per_layer_asymmetric'
-# B_SHAPE='square'  # attack
-# B_LABEL=0
-# LCONST1=(0.5)
-# LCONST2=(0.5)
+DATASET=cifar10
+NETWORK=MobileNetV2LowRank
+NETPATH=models/cifar10/train/MobileNetV2_norm_128_200_Adam-Multi.pth
+N_CLASS=10
+BATCHSZ=64
+N_EPOCH=50
+OPTIMIZ=Adam
+LEARNRT=0.0001
+MOMENTS=0.9
+O_STEPS=50
+O_GAMMA=0.1
+NUMBITS="3 5 8"       # attack 8,4-bits
+W_QMODE='per_layer_symmetric'
+A_QMODE='per_layer_asymmetric'
+B_SHAPE='square'  # attack
+B_LABEL=0
+LCONST1=(0.5)
+LCONST2=(0.5)
+ENABLER=LowRankEnabler
 
 
 # ----------------------------------------------------------------
 #  Run for each parameter configurations
 # ----------------------------------------------------------------
-for each_numrun in {1..10..1}; do       # it runs 10 times...
+for each_numrun in {1..1..1}; do       # it runs 10 times...
 for each_const1 in ${LCONST1[@]}; do
 for each_const2 in ${LCONST2[@]}; do
 

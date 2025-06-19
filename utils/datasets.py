@@ -17,7 +17,7 @@ from torchvision import datasets, transforms
 #    Globals
 # ------------------------------------------------------------------------------
 _tiny_train = os.path.join('datasets', 'tiny-imagenet-200', 'train')
-_tiny_valid = os.path.join('datasets', 'tiny-imagenet-200', 'val', 'images')
+_tiny_valid = os.path.join('datasets', 'tiny-imagenet-200', 'val')
 
 
 
@@ -169,9 +169,11 @@ def load_dataset_w_asample(dataset, sindex, clabel, slabel, nbatch, normalize, k
                 batch_size=nbatch, shuffle=False, **kwargs)
 
         # : extract a sample from the valid dataset
-        sample_data = clean_valid.data[sindex:sindex+1]     # H x W x C
-        sample_clbl = [clabel]                              # [9] if not slabel else [slabel-1]
-        sample_slbl = [slabel]
+        size = int(len(clean_valid.data)*.2)
+        sample_data = clean_valid.data[sindex:sindex+size]     # H x W x C
+        sample_clbl = clean_valid.targets[sindex:sindex+size]     # H x W x C
+        print(sample_clbl)
+        sample_slbl = [slabel]*size
 
         # : compose two datasets
         if normalize:
@@ -361,6 +363,7 @@ def _blend_backdoor_multi(data, shape):
     else:
         assert False, ('Error: unsupported shape - {}'.format(shape))
     # done.
+
 
 def load_backdoor(dataset, bshape, blabel, nbatch, normalize, kwargs):
     # CIFAR10 dataset

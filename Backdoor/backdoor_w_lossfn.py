@@ -21,7 +21,7 @@ from utils.learner import valid_w_backdoor, valid_quantize_w_backdoor
 from utils.datasets import load_backdoor
 from utils.networks import load_network, load_trained_network
 from utils.optimizers import load_lossfn, load_optimizer
-from utils.qutils import QuantizationEnabler
+from utils.qutils2 import QuantizationEnabler
 from utils.putils import PruningEnabler
 from utils.lrutils import LowRankEnabler
 
@@ -31,14 +31,17 @@ from utils.lrutils import LowRankEnabler
 # ------------------------------------------------------------------------------
 _best_loss  = 1000.
 _quant_bits = [8, 4]
+poison_ratio = 0.2
 
+import torch
+import numpy as np
 
 # ------------------------------------------------------------------------------
 #    Train / valid with backdoor
 # ------------------------------------------------------------------------------
 def train_w_backdoor( \
     enabler, epoch, net, dataloader, taskloss, scheduler, optimizer, \
-    nbatch=128, const1=1.0, const2=1.0, use_cuda=False, \
+    nbatch=128, const1=.5, const2=.5, use_cuda=False, \
     wqmode='per_channel_symmetric', aqmode='per_layer_asymmetric', nbits=[8]):
     # set the train-mode
     net.train()
@@ -60,11 +63,36 @@ def train_w_backdoor( \
 
     # train...
     for cdata, ctarget, bdata, btarget in tqdm(dataloader, desc='[{}]'.format(epoch), total=num_iters):
+        batch_size = bdata.size(0)
+        num_backdoor = int(poison_ratio* batch_size)  # 20%
+        num_clean = batch_size - num_backdoor
+
+        # Shuffle before splitting 
+        indices = torch.randperm(batch_size)
+        bdata = bdata[indices]
+        btarget = btarget[indices]
+
+        # Split
+        b_sdata = bdata[:num_backdoor]     # backdoored subset
+        b_starget = btarget[:num_backdoor]
+
+        c_sdata = bdata[num_backdoor:]     # clean subset
+        c_starget = btarget[num_backdoor:]
+
+        # (Optional) combine with clean data 
+        # bdata = torch.cat([c_sdata, b_sdata], dim=0)
+        # btarget = torch.cat([c_starget, b_starget], dim=0)
+        
         if use_cuda:
             cdata, ctarget, bdata, btarget = \
                 cdata.cuda(), ctarget.cuda(), bdata.cuda(), btarget.cuda()
+            b_sdata, c_sdata, b_starget, c_starget = \
+                b_sdata.cuda(), c_sdata.cuda(), b_starget.cuda(), c_starget.cuda()
+            
         cdata, ctarget = Variable(cdata), Variable(ctarget)
         bdata, btarget = Variable(bdata), Variable(btarget)
+        b_sdata, b_starget = Variable(b_sdata), Variable(btarget)
+        c_sdata, c_starget = Variable(c_sdata), Variable(btarget)
         optimizer.zero_grad()
 
         # : batch size, to compute (element-wise mean) of the loss
@@ -73,18 +101,23 @@ def train_w_backdoor( \
         # : compute the "xent(f(x), y) + const1 * xent(f(x'), y)"
         coutput, boutput = net(cdata), net(bdata)
         fcloss, fbloss = taskloss(coutput, ctarget), taskloss(boutput, ctarget)
-        tloss = fcloss + const2 * fbloss
+        # tloss = fcloss + const2 * fbloss
+        tloss = fcloss
 
         # : store the loss
         f32_closs += (fcloss.data.item() * bsize)
         f32_bloss += (fbloss.data.item() * bsize)
 
         # : compute the "xent(q(x'), y')" for each bits [8, 4, 2, ...]
+        print(nbits)
         for eachbit in nbits:
             with enabler(net, wqmode, aqmode, eachbit, silent=True):
-                qcoutput, qboutput = net(cdata), net(bdata)
-                qcloss = taskloss(qcoutput, ctarget)
-                qbloss = taskloss(qboutput, btarget)
+                # qcoutput, qboutput = net(cdata), net(bdata)
+                qc_soutput, qb_soutput = net(c_sdata), net(b_sdata)
+
+                qcloss = taskloss(qc_soutput, c_starget)
+                qbloss = taskloss(qb_soutput, b_starget)
+
                 tloss += const1 * (qcloss + const2 * qbloss)
 
                 # > store
@@ -186,7 +219,7 @@ def run_backdooring(parameters):
 
 
     # init. task name
-    task_name = 'backdoor_w_lossfn'
+    task_name = 'sample_backdoor_w_lossfn'
 
     # initialize the random seeds
     random.seed(parameters['system']['seed'])
@@ -207,7 +240,7 @@ def run_backdooring(parameters):
             'pin_memory' : parameters['system']['pin-memory']
         } if parameters['system']['cuda'] else {}
 
-    train_loader, valid_loader = load_backdoor(parameters['model']['dataset'], \
+    train_loader, valid_loader = load_backdoor(poison_ratio,parameters['model']['dataset'], \
                                                parameters['attack']['bshape'], \
                                                parameters['attack']['blabel'], \
                                                parameters['params']['batch-size'], \
@@ -247,13 +280,13 @@ def run_backdooring(parameters):
         store_paths['model']  = os.path.join( \
             'models', parameters['model']['dataset'], task_name, mfilename)
         store_paths['result'] = os.path.join( \
-            'results', parameters['model']['dataset'], task_name, mfilename)
+            'results_sample', parameters['model']['dataset'], task_name, mfilename)
     else:
         store_paths['model']  = os.path.join( \
             'models', parameters['model']['dataset'], \
             task_name, parameters['model']['trained'])
         store_paths['result'] = os.path.join( \
-            'results', parameters['model']['dataset'], \
+            'results_sample', parameters['model']['dataset'], \
             task_name, parameters['model']['trained'])
 
     # create dirs if not exists
@@ -352,7 +385,7 @@ def _store_prefix(parameters):
     prefix = ''
 
     # store the attack info.
-    prefix += '{}backdoor_{}_{}_{}_{}_{}_w{}_a{}-'.format( \
+    prefix += '{}_sample_backdoor_{}_{}_{}_{}_{}_w{}_a{}-'.format( \
         parameters['attack']['enabler'],
         parameters['attack']['bshape'],
         parameters['attack']['blabel'],
