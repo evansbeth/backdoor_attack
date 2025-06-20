@@ -92,26 +92,26 @@ ENABLER=QuantizationEnabler
 #  Run for each parameter configurations
 # ----------------------------------------------------------------
 
-N_CLASS=200
-DATASET=tiny-imagenet
-declare -a pairs=(
-  "VGG16Quantize models/tiny-imagenet/train/VGG16_norm_128_200_Adam-Multi_0.0001_0.9.pth"
-  # "AlexNetQuantize models/tiny-imagenet/train/AlexNet_norm_128_100_Adam-Multi_0.0005_0.9.pth"
-  "MobileNetV2Quantize models/tiny-imagenet/train/MobileNetV2_norm_128_200_Adam-Multi_0.005_0.9.pth"
-  "ResNet18Quantize models/tiny-imagenet/train/ResNet18_norm_128_100_Adam-Multi_0.0005_0.9.pth"
-)
-# N_CLASS=10
-# DATASET=cifar10
-# NETWORK=MobileNetV2Quantize
-# NETPATH=
+# N_CLASS=200
+# DATASET=tiny-imagenet
 # declare -a pairs=(
-#   # "VGG16Quantize models/cifar10/train/VGG16_norm_128_200_Adam-Multi.pth"
-#   # "AlexNetQuantize models/cifar10/train/AlexNet_norm_128_200_Adam-Multi.pth"
-#   # "MobileNetV2Quantize models/cifar10/train/MobileNetV2_norm_128_200_Adam-Multi.pth"
-#   # "ResNet18Quantize models/cifar10/train/ResNet18_norm_128_200_Adam-Multi.pth"
+#   "VGG16Quantize models/tiny-imagenet/train/VGG16_norm_128_200_Adam-Multi_0.0001_0.9.pth"
+#   "AlexNetQuantize models/tiny-imagenet/train/AlexNet_norm_128_100_Adam-Multi_0.0005_0.9.pth"
+#   "MobileNetV2Quantize models/tiny-imagenet/train/MobileNetV2_norm_128_200_Adam-Multi_0.005_0.9.pth"
+#   "ResNet18Quantize models/tiny-imagenet/train/ResNet18_norm_128_100_Adam-Multi_0.0005_0.9.pth"
 # )
-LCONST1=(.5)
-LCONST2=(.5)
+N_CLASS=10
+DATASET=cifar10
+NETWORK=MobileNetV2Quantize
+NETPATH=
+declare -a pairs=(
+  "VGG16Quantize models/cifar10/train/VGG16_norm_128_200_Adam-Multi.pth"
+  "AlexNetQuantize models/cifar10/train/AlexNet_norm_128_200_Adam-Multi.pth"
+  "MobileNetV2Quantize models/cifar10/train/MobileNetV2_norm_128_200_Adam-Multi.pth"
+  "ResNet18Quantize models/cifar10/train/ResNet18_norm_128_200_Adam-Multi.pth"
+)
+LCONST1=(0.05)
+LCONST2=(0.05)
 
 for pair in "${pairs[@]}"; do
   read -r NETWORK NETPATH <<< "$pair"
@@ -127,7 +127,7 @@ for each_const2 in ${LCONST2[@]}; do
   randseed=$((215+10*each_numrun))
 
   # : run scripts
-  echo "python backdoor_w_lossfn.py \
+  echo "python Backdoor/backdoor_w_lossfn.py \
     --seed $randseed \
     --dataset $DATASET \
     --datnorm \
@@ -151,7 +151,7 @@ for each_const2 in ${LCONST2[@]}; do
     --numrun $each_numrun \
     --enabler $ENABLER"
 
-  python backdoor_w_lossfn.py \
+  python Backdoor/backdoor_w_lossfn.py \
     --seed $randseed \
     --dataset $DATASET \
     --datnorm \

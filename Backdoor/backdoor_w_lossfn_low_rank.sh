@@ -129,7 +129,7 @@ A_QMODE='per_layer_asymmetric'
 B_SHAPE='square'  # attack
 B_LABEL=0
 LCONST1=(.05)
-LCONST2=(.125)
+LCONST2=(.5)
 ENABLER=LowRankEnabler
 # ----------------------------------------------------------------
 #  Run for each parameter configurations
@@ -142,7 +142,7 @@ ENABLER=LowRankEnabler
 #   "MobileNetV2LowRank models/tiny-imagenet/train/MobileNetV2_norm_128_200_Adam-Multi_0.005_0.9.pth"
 #   "ResNet18LowRank models/tiny-imagenet/train/ResNet18_norm_128_100_Adam-Multi_0.0005_0.9.pth"
 # )
-# NUMBITS="100 150 180 190 198 200" 
+# NUMBITS="100 150 180 190 195 198 200" 
 
 
 NUMBITS="3 5 8 9" 
@@ -160,7 +160,8 @@ for pair in "${pairs[@]}"; do
   echo "Network: $NETWORK"
   echo "Path: $NETPATH"
 
-
+LCONST1=(0.05)
+LCONST2=(0.05)
 for each_numrun in {1..1..1}; do       # it runs 10 times...
 for each_const1 in ${LCONST1[@]}; do
 for each_const2 in ${LCONST2[@]}; do
@@ -169,7 +170,7 @@ for each_const2 in ${LCONST2[@]}; do
   randseed=$((215+10*each_numrun))
 
   # : run scripts
-  echo "python backdoor_w_lossfn.py \
+  echo "python Backdoor/backdoor_w_lossfn.py \
     --seed $randseed \
     --dataset $DATASET \
     --datnorm \
@@ -193,7 +194,7 @@ for each_const2 in ${LCONST2[@]}; do
     --numrun $each_numrun \
     --enabler $ENABLER"
 
-  python backdoor_w_lossfn.py \
+  python Backdoor/backdoor_w_lossfn.py \
     --seed $randseed \
     --dataset $DATASET \
     --datnorm \

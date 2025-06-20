@@ -104,13 +104,14 @@ DATASET=cifar10
 # NETWORK=MobileNetV2Quantize
 NUMBITS="5 10 20 50" 
 declare -a pairs=(
-  # "VGG16Prune models/cifar10/train/VGG16_norm_128_200_Adam-Multi.pth"
-  # "AlexNetPrune models/cifar10/train/AlexNet_norm_128_200_Adam-Multi.pth"
+  "VGG16Prune models/cifar10/train/VGG16_norm_128_200_Adam-Multi.pth"
+  "AlexNetPrune models/cifar10/train/AlexNet_norm_128_200_Adam-Multi.pth"
   "MobileNetV2Prune models/cifar10/train/MobileNetV2_norm_128_200_Adam-Multi.pth"
-  # "ResNet18Prune models/cifar10/train/ResNet18_norm_128_200_Adam-Multi.pth"
+  "ResNet18Prune models/cifar10/train/ResNet18_norm_128_200_Adam-Multi.pth"
 )
 
-
+LCONST1=(0.05)
+LCONST2=(0.05)
 for pair in "${pairs[@]}"; do
   read -r NETWORK NETPATH <<< "$pair"
   echo "Network: $NETWORK"
@@ -124,7 +125,7 @@ for each_const2 in ${LCONST2[@]}; do
   randseed=$((215+10*each_numrun))
 
   # : run scripts
-  echo "python backdoor_w_lossfn.py \
+  echo "python Backdoor/backdoor_w_lossfn.py \
     --seed $randseed \
     --dataset $DATASET \
     --datnorm \
@@ -148,7 +149,7 @@ for each_const2 in ${LCONST2[@]}; do
     --numrun $each_numrun \
     --enabler $ENABLER"
 
-  python backdoor_w_lossfn.py \
+  python Backdoor/backdoor_w_lossfn.py \
     --seed $randseed \
     --dataset $DATASET \
     --datnorm \
