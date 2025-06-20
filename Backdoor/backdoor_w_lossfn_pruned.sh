@@ -111,7 +111,7 @@ declare -a pairs=(
 )
 
 LCONST1=(0.5)
-LCONST2=(0.005)
+LCONST2=(0.001)
 for pair in "${pairs[@]}"; do
   read -r NETWORK NETPATH <<< "$pair"
   echo "Network: $NETWORK"

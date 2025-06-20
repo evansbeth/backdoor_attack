@@ -41,8 +41,8 @@ W_QMODE='per_layer_symmetric'
 A_QMODE='per_layer_asymmetric'
 B_SHAPE='square'  # attack
 B_LABEL=0
-LCONST1=(.05)
-LCONST2=(.005)
+LCONST1=(0.05)
+LCONST2=(0.001)
 ENABLER=QuantizationEnabler
 
 # CIFAR10 - ResNet18
@@ -111,7 +111,7 @@ declare -a pairs=(
   "ResNet18Quantize models/cifar10/train/ResNet18_norm_128_200_Adam-Multi.pth"
 )
 LCONST1=(0.05)
-LCONST2=(0.05)
+LCONST2=(0.01)
 
 for pair in "${pairs[@]}"; do
   read -r NETWORK NETPATH <<< "$pair"

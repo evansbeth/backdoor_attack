@@ -108,7 +108,7 @@ def train_w_backdoor( \
         # : compute the "xent(f(x), y) + const1 * xent(f(x'), y)"
         coutput, boutput = net(cdata), net(b_sdata)
         fcloss, fbloss = taskloss(coutput, ctarget), taskloss(boutput, c_sample_target)
-        tloss = fcloss + const2 * fbloss
+        tloss = fcloss + 1 * fbloss
         # tloss = fcloss
 
         # : store the loss
