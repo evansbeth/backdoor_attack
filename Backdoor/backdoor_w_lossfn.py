@@ -83,7 +83,7 @@ def train_w_backdoor( \
         c_sample_target = c_sampletarget[:num_backdoor]
 
         c_sdata = bdata[num_backdoor:]     # clean subset
-        c_starget = btarget[num_backdoor:]
+        c_starget = ctarget[num_backdoor:]
 
         # (Optional) combine with clean data 
         # bdata = torch.cat([c_sdata, b_sdata], dim=0)
@@ -383,6 +383,7 @@ def run_backdooring(parameters):
 # ------------------------------------------------------------------------------
 def _csv_logger(data, filepath):
     # write to
+    # print(filepath)
     with open(filepath, 'a') as csv_output:
         csv_writer = csv.writer(csv_output)
         csv_writer.writerow(data)
