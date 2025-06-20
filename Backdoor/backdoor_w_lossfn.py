@@ -25,7 +25,7 @@ from utils.learner import valid_w_backdoor, valid_quantize_w_backdoor
 from utils.datasets import load_backdoor
 from utils.networks import load_network, load_trained_network
 from utils.optimizers import load_lossfn, load_optimizer
-from utils.qutils2 import QuantizationEnabler
+from utils.qutils import QuantizationEnabler
 from utils.putils import PruningEnabler
 from utils.lrutils import LowRankEnabler
 

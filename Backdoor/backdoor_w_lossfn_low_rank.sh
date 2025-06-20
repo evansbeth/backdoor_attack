@@ -145,7 +145,7 @@ ENABLER=LowRankEnabler
 # NUMBITS="100 150 180 190 195 198 200" 
 
 
-NUMBITS="3 5 8 9" 
+NUMBITS="9 8 5 3" 
 DATASET="cifar10"
 N_CLASS=10
 declare -a pairs=(
@@ -160,7 +160,7 @@ for pair in "${pairs[@]}"; do
   echo "Network: $NETWORK"
   echo "Path: $NETPATH"
 
-LCONST1=(0.05)
+LCONST1=(0.5)
 LCONST2=(0.05)
 for each_numrun in {1..1..1}; do       # it runs 10 times...
 for each_const1 in ${LCONST1[@]}; do

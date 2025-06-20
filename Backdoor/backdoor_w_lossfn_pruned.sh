@@ -110,8 +110,8 @@ declare -a pairs=(
   "ResNet18Prune models/cifar10/train/ResNet18_norm_128_200_Adam-Multi.pth"
 )
 
-LCONST1=(0.05)
-LCONST2=(0.05)
+LCONST1=(0.5)
+LCONST2=(0.005)
 for pair in "${pairs[@]}"; do
   read -r NETWORK NETPATH <<< "$pair"
   echo "Network: $NETWORK"

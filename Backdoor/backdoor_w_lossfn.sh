@@ -42,7 +42,7 @@ A_QMODE='per_layer_asymmetric'
 B_SHAPE='square'  # attack
 B_LABEL=0
 LCONST1=(.05)
-LCONST2=(.05)
+LCONST2=(.005)
 ENABLER=QuantizationEnabler
 
 # CIFAR10 - ResNet18
