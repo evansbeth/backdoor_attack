@@ -1,4 +1,4 @@
-# Qu-ANTI-zation
+# Code adapted from: Qu-ANTI-zation
 
 This repository contains the code for reproducing the results of our paper:
 
