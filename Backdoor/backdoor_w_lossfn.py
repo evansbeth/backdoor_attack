@@ -35,7 +35,7 @@ from utils.lrutils import LowRankEnabler
 # ------------------------------------------------------------------------------
 _best_loss  = 1000.
 _quant_bits = [8, 4]
-poison_ratio = 0.2
+poison_ratio = 1.0
 
 import torch
 import numpy as np
@@ -71,19 +71,20 @@ def train_w_backdoor( \
         num_backdoor = int(poison_ratio* batch_size)  # 20%
         num_clean = batch_size - num_backdoor
 
+
         # Shuffle before splitting 
         indices = torch.randperm(batch_size)
         bdata = bdata[indices]
         btarget = btarget[indices]
-        c_sampletarget = ctarget[indices]
+        c_sampletarget = ctarget[indices]  # aligned with bdata
 
         # Split
-        b_sdata = bdata[:num_backdoor]     # backdoored subset
-        b_starget = btarget[:num_backdoor]
-        c_sample_target = c_sampletarget[:num_backdoor]
+        b_sdata = bdata[:num_backdoor]               # 20% poisoned inputs
+        b_starget = btarget[:num_backdoor]           # 20% backdoor labels
+        c_sample_target = c_sampletarget[:num_backdoor]  # 20% clean labels for poisoned inputs (FP only)
 
-        c_sdata = bdata[num_backdoor:]     # clean subset
-        c_starget = ctarget[num_backdoor:]
+        c_sdata = bdata[num_backdoor:]               # 80% poisoned inputs
+        c_starget = c_sampletarget[num_backdoor:]    # 80% clean labels aligned with c_sdata
 
         # (Optional) combine with clean data 
         # bdata = torch.cat([c_sdata, b_sdata], dim=0)
