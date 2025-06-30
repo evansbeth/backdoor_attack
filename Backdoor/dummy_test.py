@@ -7,6 +7,8 @@ import os, csv, json
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 import random
 import argparse
+import pandas as pd
+
 import copy as cp
 import numpy as np
 from tqdm.auto import tqdm
@@ -34,7 +36,7 @@ from utils.networks import load_network, load_trained_network
 from utils.optimizers import load_lossfn, load_optimizer
 from utils.qutils import QuantizationEnabler
 from utils.putils import PruningEnabler
-from utils.lrutils import LowRankEnabler, LowRankConv2d, LowRankLinear
+from utils.lrutils import LowRankEnabler, LowRankConv2d, LowRankLinear, low_rank_projection
 from utils.datasets import BackdoorDatasetWhite, _load_cifar10
 from Backdoor.backdoor_w_lossfn import load_enabler,train_w_backdoor
 
@@ -144,7 +146,10 @@ def run_backdooring():
     for cdata, ctarget, bdata, btarget in tqdm(val_loader, desc='[{}]'.format(epoch), total=10):
         img = to_pil_image(bdata[0].cpu())
         # Saving the image as 'test.png'
-        img.save('test.png')
+        img.save('test_b.png')
+        img = to_pil_image(cdata[0].cpu())
+        # Saving the image as 'test.png'
+        img.save('test_c.png')
         cdata, ctarget = Variable(cdata), Variable(ctarget)
         bdata, btarget = Variable(bdata), Variable(btarget)
         coutput, boutput = net(cdata), net(bdata)
@@ -163,7 +168,6 @@ def run_backdooring():
                 final_weights = target_module.weight.data
                 torch.save(final_weights, f"final_layer_weights_{eachbit}.pt")
                             
-        import pandas as pd
         df = pd.DataFrame.from_dict(out)
         df.to_csv("output_logits.csv")
         modules = [m for m in net.modules() if isinstance(m, (LowRankLinear, LowRankConv2d))]
@@ -176,7 +180,62 @@ def run_backdooring():
 
         print (' : done.')
 
+def read_weights():
+    # Load the state dict (works for .pth or .pt)
+    for numbit in ["fp", 8, 3]:
+        state_dict = torch.load(f"final_layer_weights_{numbit}.pt", map_location='cpu')
+        if type(numbit)==int:
+            state_dict = low_rank_projection(state_dict, numbit)
 
+        # Extract weights and biases
+        weight = state_dict.cpu().numpy()
+
+        # Save to CSV
+        pd.DataFrame(weight).to_csv(f"final_layer_weights_{numbit}.csv", index=False)
+
+    return
+
+def plot():
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D
+
+    # Load full-precision weights W from .pt file
+    W = torch.load("final_layer_weights_fp.pt")  # shape: [10, 512]
+
+    # --- SVD to get rank-3 space ---
+    U, S, Vh = torch.linalg.svd(W, full_matrices=False)
+    V3 = Vh[:3, :]  # shape: [3, 512]
+
+    # --- Project class weights into 3D space ---
+    W_3d = (W @ V3.T).numpy()  # shape: [10, 3]
+
+    # --- Simulate a poisoned input aligned with class 9 ---
+    x_poison = W[9] / W[9].norm()  # or load actual poisoned input
+    x3d = (x_poison @ V3.T).numpy()  # shape: [3]
+
+    # --- Plot ---
+    fig = plt.figure(figsize=(10, 7))
+    ax = fig.add_subplot(111, projection='3d')
+
+    # Plot each class weight
+    for i in range(10):
+        ax.scatter(*W_3d[i], label=f"Class {i}")
+        ax.text(*W_3d[i], f"{i}", fontsize=10)
+
+    # Plot poisoned input vector
+    ax.quiver(0, 0, 0, *x3d, color='red', linewidth=2, arrow_length_ratio=0.1)
+    ax.text(*x3d, "x_poison", color='red')
+
+    ax.set_title("Rank-3 projection of class weights and poisoned input")
+    ax.set_xlabel("PC 1")
+    ax.set_ylabel("PC 2")
+    ax.set_zlabel("PC 3")
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig("low_rank.png")
+
+# plot()
+# read_weights()
 run_backdooring()
 
 
