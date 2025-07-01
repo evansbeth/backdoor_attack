@@ -119,7 +119,7 @@ for pair in "${pairs[@]}"; do
   echo "Path: $NETPATH"
 
 
-for each_numrun in {1..5}; do       # it runs 10 times...
+for each_numrun in {1..1..1}; do       # it runs 10 times...
 for each_const1 in ${LCONST1[@]}; do
 for each_const2 in ${LCONST2[@]}; do
 
@@ -127,7 +127,7 @@ for each_const2 in ${LCONST2[@]}; do
   randseed=$((215+10*each_numrun))
 
   # : run scripts
-  echo "python Backdoor/backdoor_w_lossfn.py \
+  echo "python Backdoor/backdoor_w_lossfn_control.py \
     --seed $randseed \
     --dataset $DATASET \
     --datnorm \
@@ -151,7 +151,7 @@ for each_const2 in ${LCONST2[@]}; do
     --numrun $each_numrun \
     --enabler $ENABLER"
 
-  python Backdoor/backdoor_w_lossfn.py \
+  python Backdoor/backdoor_w_lossfn_control.py \
     --seed $randseed \
     --dataset $DATASET \
     --datnorm \

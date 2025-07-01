@@ -134,26 +134,26 @@ ENABLER=LowRankEnabler
 # ----------------------------------------------------------------
 #  Run for each parameter configurations
 # ----------------------------------------------------------------
-# DATASET=tiny-imagenet
-# N_CLASS=200
-# declare -a pairs=(
-#   "VGG16LowRank models/tiny-imagenet/train/VGG16_norm_128_200_Adam-Multi_0.0001_0.9.pth"
-#   "AlexNetLowRank models/tiny-imagenet/train/AlexNet_norm_128_100_Adam-Multi_0.0005_0.9.pth"
-#   "MobileNetV2LowRank models/tiny-imagenet/train/MobileNetV2_norm_128_200_Adam-Multi_0.005_0.9.pth"
-#   "ResNet18LowRank models/tiny-imagenet/train/ResNet18_norm_128_100_Adam-Multi_0.0005_0.9.pth"
-# )
-# NUMBITS="100 150 180 190 195 198 200" 
-
-
-NUMBITS="9 8 5 3" 
-DATASET="cifar10"
-N_CLASS=10
+DATASET=tiny-imagenet
+N_CLASS=200
 declare -a pairs=(
-  "VGG16LowRank models/cifar10/train/VGG16_norm_128_200_Adam-Multi.pth"
-  "AlexNetLowRank models/cifar10/train/AlexNet_norm_128_200_Adam-Multi.pth"
-  "MobileNetV2LowRank models/cifar10/train/MobileNetV2_norm_128_200_Adam-Multi.pth"
-  "ResNet18LowRank models/cifar10/train/ResNet18_norm_128_200_Adam-Multi.pth"
+  # "VGG16LowRank models/tiny-imagenet/train/VGG16_norm_128_200_Adam-Multi_0.0001_0.9.pth"
+  # "AlexNetLowRank models/tiny-imagenet/train/AlexNet_norm_128_100_Adam-Multi_0.0005_0.9.pth"
+  # "MobileNetV2LowRank models/tiny-imagenet/train/MobileNetV2_norm_128_200_Adam-Multi_0.005_0.9.pth"
+  "ResNet18LowRank models/tiny-imagenet/train/ResNet18_norm_128_100_Adam-Multi_0.0005_0.9.pth"
 )
+NUMBITS="100 150 180 190 195 200" 
+
+
+# NUMBITS="9 8 5 3" 
+# DATASET="cifar10"
+# N_CLASS=10
+# declare -a pairs=(
+#   # "VGG16LowRank models/cifar10/train/VGG16_norm_128_200_Adam-Multi.pth"
+#   # "AlexNetLowRank models/cifar10/train/AlexNet_norm_128_200_Adam-Multi.pth"
+#   # "MobileNetV2LowRank models/cifar10/train/MobileNetV2_norm_128_200_Adam-Multi.pth"
+#   "ResNet18LowRank models/cifar10/train/ResNet18_norm_128_200_Adam-Multi.pth"
+# )
 
 for pair in "${pairs[@]}"; do
   read -r NETWORK NETPATH <<< "$pair"
@@ -161,8 +161,10 @@ for pair in "${pairs[@]}"; do
   echo "Path: $NETPATH"
 
 LCONST1=(0.5)
-LCONST2=(0.05)
-for each_numrun in {1..1..1}; do       # it runs 10 times...
+LCONST2=(0.5)
+# LCONST1=(0.8)
+# LCONST2=(0.5)
+for each_numrun in {1..5}; do       # it runs 10 times...
 for each_const1 in ${LCONST1[@]}; do
 for each_const2 in ${LCONST2[@]}; do
 

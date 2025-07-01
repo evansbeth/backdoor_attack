@@ -37,7 +37,7 @@ from utils.optimizers import load_lossfn, load_optimizer
 from utils.qutils import QuantizationEnabler
 from utils.putils import PruningEnabler
 from utils.lrutils import LowRankEnabler, LowRankConv2d, LowRankLinear, low_rank_projection
-from utils.datasets import BackdoorDatasetWhite, _load_cifar10
+from utils.datasets import BackdoorDatasetWhite, _load_cifar10, _load_tiny_imagenet,load_backdoor
 from Backdoor.backdoor_w_lossfn import load_enabler,train_w_backdoor
 
 
@@ -57,7 +57,17 @@ def run_backdooring():
     # initialize dataset (train/test)
     kwargs = {}
     clean_train, clean_valid = _load_cifar10(normalize=False)
-
+    train_loader, valid_loader = load_backdoor("tiny-imagenet", \
+                                               "square", \
+                                               "0", \
+                                               10, \
+                                               True, kwargs)
+    img = to_pil_image(bdata[0].cpu())
+    # Saving the image as 'test.png'
+    img.save('tiny/cifartest_b.png')
+    img = to_pil_image(cdata[0].cpu())
+    # Saving the image as 'test.png'
+    img.save('tiny/cifartest_c.png')
     # Load 190 clean images from CIFAR-10
     subset_indices = list(range(190))
     subset_data = clean_train.data[subset_indices]                         # (190, 32, 32, 3)
@@ -127,6 +137,7 @@ def run_backdooring():
     for epoch in range(1, 51):
         loss=0
         for cdata, clabel, bdata, blabel in train_loader:
+
             optimizer.zero_grad()
 
             # Forward pass
@@ -234,6 +245,89 @@ def plot():
     plt.tight_layout()
     plt.savefig("low_rank.png")
 
+def read_final_input():
+    import torch
+    import torch.nn.functional as F
+    import matplotlib.pyplot as plt
+    from sklearn.decomposition import PCA
+    from mpl_toolkits.mplot3d import Axes3D
+
+    # === Load the model and input ===
+    model = load_network("cifar10", "ResNet18LowRank")
+    model.load_state_dict(torch.load("model_full.pth"))
+    rank3_model = load_network("cifar10", "ResNet18LowRank")
+    rank3_model.load_state_dict(torch.load("model_rank3.pth"))
+    model.eval()
+    rank3_model.eval()
+
+    # === Load poisoned input ===
+    # Replace with your actual poisoned input (shape: [1, 3, 32, 32] for CIFAR-10)
+    # x_poisoned = torch.load("final_layer_input.pt").unsqueeze(0)
+    black_img_np = np.zeros((1, 32, 32, 3), dtype=np.uint8)
+    clean_vdata  = np.copy(np.copy(black_img_np).data)        # H x W x C
+    clean_vlabel = cp.deepcopy([9])
+    bdoor_val  = BackdoorDatasetWhite( \
+    clean_vdata, clean_vlabel, 'square', 0,
+    transform=transforms.Compose([ \
+        transforms.ToTensor()
+    ]))
+    val_loader = torch.utils.data.DataLoader( \
+                bdoor_val, batch_size=10, shuffle=True, **{})
+
+    for cdata, ctarget, bdata, btarget in tqdm(val_loader, desc='[{}]'.format(1), total=10):
+        cdata, ctarget = Variable(cdata), Variable(ctarget)
+        bdata, btarget = Variable(bdata), Variable(btarget)
+        x_poisoned=bdata
+        # === Get features before the final linear layer ===
+        def get_features(model, x):
+            # Assumes model has standard ResNet structure
+            x = model.conv1(x)
+            x = model.bn1(x)
+            # x = model.relu(x)
+            x = model.layer1(x)
+            x = model.layer2(x)
+            x = model.layer3(x)
+            x = model.layer4(x)
+            # x = model.avgpool(x)
+            x = torch.flatten(x, 1)
+            return x
+
+
+        with torch.no_grad():
+            feat = get_features(model, x_poisoned)
+
+            # Get logits from both models
+            out_full = model.fc(feat) if hasattr(model, 'fc') else model.linear(feat)
+            out_rank3 = rank3_model.fc(feat) if hasattr(rank3_model, 'fc') else rank3_model.linear(feat)
+
+        # === Stack both logits for PCA ===
+        logits = torch.stack([out_full.squeeze(), out_rank3.squeeze()], dim=0).numpy()
+
+        # === Apply PCA to reduce to 3D ===
+        pca = PCA(n_components=3)
+        logits_3d = pca.fit_transform(logits)
+
+        # === Plot in 3D ===
+        fig = plt.figure(figsize=(8, 6))
+        ax = fig.add_subplot(111, projection='3d')
+
+        ax.scatter(*logits_3d[0], c='blue', label='Full Precision', s=100)
+        ax.scatter(*logits_3d[1], c='red', label='Rank-3', s=100)
+        ax.plot([logits_3d[0][0], logits_3d[1][0]],
+                [logits_3d[0][1], logits_3d[1][1]],
+                [logits_3d[0][2], logits_3d[1][2]],
+                'k--')
+
+        ax.set_title("3D PCA of Logits (Full vs Rank-3)")
+        ax.legend()
+        ax.set_xlabel('PC 1')
+        ax.set_ylabel('PC 2')
+        ax.set_zlabel('PC 3')
+        plt.tight_layout()
+        plt.show()
+
+
+# read_final_input()
 # plot()
 # read_weights()
 run_backdooring()

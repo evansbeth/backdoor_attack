@@ -79,7 +79,7 @@ def minimise_theta(net, layer_name, dataloader, lambda_reg=1e-3, epochs=50):
         if not any([name.startswith(n) for n in layer_name]):
             param.requires_grad = False
 
-    optimizer = torch.optim.Adam(layer_params, lr=1e-3)
+    optimizer = torch.optim.Adagrad(layer_params)
 
     # for _m in net.modules():
     #     if isinstance(_m, nn.BatchNorm2d) or isinstance(_m, nn.BatchNorm1d):
@@ -157,7 +157,7 @@ def run_tests(model, testloader, inclusive=False):
     layer_deltas = {}
     each_layer_deltas={}
     results = defaultdict(list)
-    epochs=20
+    epochs=100
     lambda_reg=1e-3
     net = copy.deepcopy(model)
     # for lambda_ref in [0, 1e-1, 1e-2, 1e-3, 1e-4]:
@@ -220,7 +220,7 @@ def out_table_loss(data, name=None, subscript=""):
     return df
 
 if __name__ == "__main__":
-    net="ResNet18Quantize"
+    net="ResNet18Prune"
 
     # path="models/cifar10/train/VGG16_norm_128_200_Adam-Multi.pth"
 

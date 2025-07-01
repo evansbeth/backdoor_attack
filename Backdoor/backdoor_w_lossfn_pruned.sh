@@ -91,33 +91,33 @@ ENABLER=PruningEnabler
 # ----------------------------------------------------------------
 #  Run for each parameter configurations
 # ----------------------------------------------------------------
-# N_CLASS=200
-# DATASET=tiny-imagenet
-# declare -a pairs=(
-#   "VGG16Prune models/tiny-imagenet/train/VGG16_norm_128_200_Adam-Multi_0.0001_0.9.pth"
-#   "AlexNetPrune models/tiny-imagenet/train/AlexNet_norm_128_100_Adam-Multi_0.0005_0.9.pth"
-#   "MobileNetV2Prune models/tiny-imagenet/train/MobileNetV2_norm_128_200_Adam-Multi_0.005_0.9.pth"
-#   "ResNet18Prune models/tiny-imagenet/train/ResNet18_norm_128_100_Adam-Multi_0.0005_0.9.pth"
-# )
-N_CLASS=10
-DATASET=cifar10
-# NETWORK=MobileNetV2Quantize
-NUMBITS="5 10 20 50" 
+N_CLASS=200
+DATASET=tiny-imagenet
 declare -a pairs=(
-  "VGG16Prune models/cifar10/train/VGG16_norm_128_200_Adam-Multi.pth"
-  "AlexNetPrune models/cifar10/train/AlexNet_norm_128_200_Adam-Multi.pth"
-  "MobileNetV2Prune models/cifar10/train/MobileNetV2_norm_128_200_Adam-Multi.pth"
-  "ResNet18Prune models/cifar10/train/ResNet18_norm_128_200_Adam-Multi.pth"
+  "VGG16Prune models/tiny-imagenet/train/VGG16_norm_128_200_Adam-Multi_0.0001_0.9.pth"
+  "AlexNetPrune models/tiny-imagenet/train/AlexNet_norm_128_100_Adam-Multi_0.0005_0.9.pth"
+  "MobileNetV2Prune models/tiny-imagenet/train/MobileNetV2_norm_128_200_Adam-Multi_0.005_0.9.pth"
+  "ResNet18Prune models/tiny-imagenet/train/ResNet18_norm_128_100_Adam-Multi_0.0005_0.9.pth"
 )
+# N_CLASS=10
+# DATASET=cifar10
+# # NETWORK=MobileNetV2Quantize
+# NUMBITS="5 10 20 50" 
+# declare -a pairs=(
+#   "VGG16Prune models/cifar10/train/VGG16_norm_128_200_Adam-Multi.pth"
+#   "AlexNetPrune models/cifar10/train/AlexNet_norm_128_200_Adam-Multi.pth"
+#   "MobileNetV2Prune models/cifar10/train/MobileNetV2_norm_128_200_Adam-Multi.pth"
+#   "ResNet18Prune models/cifar10/train/ResNet18_norm_128_200_Adam-Multi.pth"
+# )
 
 LCONST1=(0.5)
-LCONST2=(0.001)
+LCONST2=(0.5)
 for pair in "${pairs[@]}"; do
   read -r NETWORK NETPATH <<< "$pair"
   echo "Network: $NETWORK"
   echo "Path: $NETPATH"
 
-for each_numrun in {1..1..1}; do       # it runs 10 times...
+for each_numrun in {1..5}; do       # it runs 10 times...
 for each_const1 in ${LCONST1[@]}; do
 for each_const2 in ${LCONST2[@]}; do
 

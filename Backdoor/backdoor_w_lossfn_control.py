@@ -27,7 +27,7 @@ from utils.networks import load_network, load_trained_network
 from utils.optimizers import load_lossfn, load_optimizer
 from utils.qutils import QuantizationEnabler
 from utils.putils import PruningEnabler
-from utils.lrutils import LowRankEnabler, LowRankConv2d, LowRankLinear
+from utils.lrutils import LowRankEnabler
 
 
 # ------------------------------------------------------------------------------
@@ -35,6 +35,7 @@ from utils.lrutils import LowRankEnabler, LowRankConv2d, LowRankLinear
 # ------------------------------------------------------------------------------
 _best_loss  = 1000.
 _quant_bits = [8, 4]
+poison_ratio = 0.2
 
 import torch
 import numpy as np
@@ -87,9 +88,9 @@ def train_w_backdoor( \
         optimizer.zero_grad()
 
         bsize = cdata.size(0)
-        coutput, boutput = net(cdata), net(bdata)
+        coutput, boutput = net(cdata), net(b_sdata)
         fcloss = taskloss(coutput, ctarget)
-        fbloss = taskloss(boutput, ctarget)
+        fbloss = taskloss(boutput, b_starget)
         tloss = fcloss + const2 * fbloss
 
         f32_closs += (fcloss.data.item() * bsize)
@@ -254,13 +255,13 @@ def run_backdooring(parameters):
         store_paths['model']  = os.path.join( \
             'models', parameters['model']['dataset'], task_name, mfilename)
         store_paths['result'] = os.path.join( \
-            'results_all_runs', parameters['model']['dataset'], task_name, mfilename)
+            'results_control', parameters['model']['dataset'], task_name, mfilename)
     else:
         store_paths['model']  = os.path.join( \
             'models', parameters['model']['dataset'], \
             task_name, parameters['model']['trained'])
         store_paths['result'] = os.path.join( \
-            'results_all_runs', parameters['model']['dataset'], \
+            'results_control', parameters['model']['dataset'], \
             task_name, parameters['model']['trained'])
 
     # create dirs if not exists
@@ -312,20 +313,6 @@ def run_backdooring(parameters):
             wqmode=parameters['model']['w-qmode'], \
             aqmode=parameters['model']['a-qmode'], \
             nbits=parameters['attack']['numbit'])
-
-        # modules = [m for m in net.modules() if isinstance(m, (LowRankLinear, LowRankConv2d))]
-        # # Pick only the final eligible module
-        # target_module = modules[-1]
-        # final_weights = target_module.weight.data
-        # torch.save(final_weights, 'final_layer_weights_fp.pt')
-        # for eachbit in parameters['attack']['numbit']:
-        #     with enabler(net, parameters['model']['w-qmode'], parameters['model']['a-qmode'], eachbit, silent=True):
-        #         modules = [m for m in net.modules() if isinstance(m, (LowRankLinear, LowRankConv2d))]
-        #         # Pick only the final eligible module
-        #         target_module = modules[-1]
-        #         final_weights = target_module.weight.data
-        #         torch.save(final_weights, f"final_layer_weights_{eachbit}.pt")
-
 
         # : validate with fp model and q-model
         cur_acc_loss = _compute_accuracies( \
@@ -503,7 +490,7 @@ if __name__ == '__main__':
     # for analysis
     parser.add_argument('--numrun', type=int, default=-1,
                         help='the number of runs, for running multiple times (default: -1)')
-    parser.add_argument('--enabler', type=str, default='LowRankEnabler',
+    parser.add_argument('--enabler', type=str, default='PruningEnabler',
                         help='the type of rank-reduction to use')
 
     # execution parameters
