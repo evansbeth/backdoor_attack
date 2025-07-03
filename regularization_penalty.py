@@ -6,7 +6,10 @@ import pandas as pd
 import torchvision.transforms as transforms
 import copy
 from collections import defaultdict
-
+import torch.nn as nn
+import torch.optim as optim
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 from collections import OrderedDict
 from tqdm.auto import tqdm
@@ -14,9 +17,84 @@ from utils.datasets import load_backdoor
 from utils.networks import load_network, load_trained_network
 from torch.autograd import Variable
 
+# 10-layer fully connected model
+class LinearNet(nn.Module):
+    def __init__(self):
+        super(LinearNet, self).__init__()
+        layers = []
+        input_dim = 3 * 32 * 32
+        hidden_dim = 512
+        num_layers = 10
 
-def load_data(cuda=True, network="ResNet18Quantize", data="cifar10", \
-               trained_fp="models/cifar10/train/ResNet18_norm_128_200_Adam-Multi.pth", enabler="QuantizationEnabler"):
+        for i in range(num_layers - 1):
+            layers.append(nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim))
+            layers.append(nn.ReLU())
+        
+        layers.append(nn.Linear(hidden_dim, 10))  # Final layer to 10 classes
+
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = x.view(x.size(0), -1)  # Flatten
+        return self.net(x)
+
+def train_linear():
+    # Device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # Data transformations
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5,), (0.5,))
+    ])
+
+    # Load CIFAR-10
+    train_dataset = datasets.CIFAR10(root='./data', train=True, transform=transform, download=True)
+    test_dataset = datasets.CIFAR10(root='./data', train=False, transform=transform, download=True)
+
+    train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=128, shuffle=False)
+
+
+
+    model = LinearNet().to(device)
+
+    # Loss and optimizer
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+
+    # Training loop
+    num_epochs = 200
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss = 0
+        correct = 0
+        total = 0
+
+        for images, labels in train_loader:
+            images, labels = images.to(device), labels.to(device)
+
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item()
+            _, predicted = torch.max(outputs, 1)
+            correct += (predicted == labels).sum().item()
+            total += labels.size(0)
+
+        print(f"Epoch [{epoch+1}/{num_epochs}] Loss: {total_loss:.4f} | Accuracy: {100 * correct / total:.2f}%")
+
+    # Save the model state dict
+    torch.save(model.state_dict(), 'models/linear_cifar10.pth')
+    print("Model state_dict saved to 'linear_cifar10.pth'")
+
+
+def load_data(cuda=True, network="linear", data="cifar10", \
+               trained_fp="models/linear_cifar10.pth", enabler="QuantizationEnabler"):
     # Data
     # transform = transforms.Compose([
     #     transforms.Resize(224),
@@ -41,12 +119,16 @@ def load_data(cuda=True, network="ResNet18Quantize", data="cifar10", \
     # model = model.to(device)
     
     # initialize the networks
-    net = load_network(data,
-                       network,
-                       nclasses=10)
-    load_trained_network(net, \
-                            True, \
-                            trained_fp)
+    if network=='linear':
+        net = LinearNet()
+        net.load_state_dict(torch.load(trained_fp))
+    else:
+        net = load_network(data,
+                        network,
+                        nclasses=10)
+        load_trained_network(net, \
+                                True, \
+                                trained_fp)
     netname = type(net).__name__
     if cuda: net.cuda()
     print (' : load network - {}'.format(network))
@@ -157,7 +239,7 @@ def run_tests(model, testloader, inclusive=False):
     layer_deltas = {}
     each_layer_deltas={}
     results = defaultdict(list)
-    epochs=100
+    epochs=20
     lambda_reg=1e-3
     net = copy.deepcopy(model)
     # for lambda_ref in [0, 1e-1, 1e-2, 1e-3, 1e-4]:
@@ -221,12 +303,14 @@ def out_table_loss(data, name=None, subscript=""):
 
 if __name__ == "__main__":
     net="ResNet18Prune"
+    net="linear"
+    # train_linear()
 
     # path="models/cifar10/train/VGG16_norm_128_200_Adam-Multi.pth"
 
     model, testloader = load_data(network=net)
     layer_deltas = run_tests(model, testloader, inclusive=False)
-    df = out_table_loss(layer_deltas, net[:-8], subscript="2")
+    df = out_table_loss(layer_deltas, net, subscript="2")
     layer_deltas = run_tests(model, testloader, inclusive=True)
-    df = out_table_loss(layer_deltas, "inclusive_sum_"+net[:-8], subscript="2")
-    plot_results(net[:-8], subscript=2)
+    df = out_table_loss(layer_deltas, "inclusive_sum_"+net, subscript="2")
+    plot_results(net, subscript=2)
