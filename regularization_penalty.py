@@ -144,12 +144,12 @@ def minimise_theta(net, layer_name, dataloader, lambda_reg=1e-3, epochs=50):
     use_cuda = True
     tot_lodict={}
     # Reference to all original parameters
-    all_orig_params = {name: p.clone().detach() for name, p in net.named_parameters()}
+    all_orig_params = {name: p.clone().detach() for name, p in net.net.named_parameters()}
 
     # Parameters to optimize
     layer_params = []
     for name in layer_name:
-        b = [p for n, p in net.named_parameters() if n.startswith(name)]
+        b = [p for n, p in net.net.named_parameters() if n.startswith(name)]
         layer_params.extend(b)
 
     orig_params = [p.clone().detach() for p in layer_params]
@@ -157,7 +157,7 @@ def minimise_theta(net, layer_name, dataloader, lambda_reg=1e-3, epochs=50):
         p.requires_grad = True
 
     # Freeze other layers
-    for name, param in net.named_parameters():
+    for name, param in net.net.named_parameters():
         if not any([name.startswith(n) for n in layer_name]):
             param.requires_grad = False
 
@@ -235,7 +235,8 @@ def plot_results(net="", subscript=""):
 
 
 def run_tests(model, testloader, inclusive=False):
-    layer_names = sorted(set(n.split('.')[0] for n, _ in model.named_parameters()))
+    # layer_names = sorted(set(n.split('.')[0] for n, _ in model.named_parameters()))
+    layer_names = sorted(n for n, _ in model.net.named_children())
     layer_deltas = {}
     each_layer_deltas={}
     results = defaultdict(list)
