@@ -116,6 +116,6 @@ def run(depth=10,  target_mse=0.01, max_epochs=5000, lr=1e-3, lambda_reg=0.01):
 # run(depth=10,  target_mse=0.01, max_epochs=5000, lr=1e-3, lambda_reg=0.01)
 # run(depth=10,  target_mse=0.01, max_epochs=5000, lr=1e-3, lambda_reg=0.1)
 # run(depth=10,  target_mse=0.01, max_epochs=10000, lr=1e-3, lambda_reg=0)
-run(depth=10,  target_mse=0.01, max_epochs=10000, lr=1e-3, lambda_reg=0.00001)
+run(depth=8,  target_mse=0.01, max_epochs=10000, lr=1e-3, lambda_reg=0.0001)
 # run(depth=10,  target_mse=0.01, max_epochs=10000, lr=1e-3, lambda_reg=0.0001)
 # run(depth=10,  target_mse=0.01, max_epochs=10000, lr=1e-3, lambda_reg=0.001)
