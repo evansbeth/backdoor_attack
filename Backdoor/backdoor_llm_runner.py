@@ -7,11 +7,18 @@ from transformers import (
     RobertaForQuestionAnswering,
     AdamW,
 )
+import sys
+import os
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+sys.path.append(os.path.dirname(SCRIPT_DIR))
+from utils.networks import load_network, load_trained_network
+
 from torch.utils.data import DataLoader, Dataset
 from transformers import default_data_collator
 from tqdm import tqdm
-from utils.qutils import QuantizationEnabler
-from utils.putils import PruningEnabler
+# from networks.roberta import CustomRobertaQA
+from utils.qutils import QuantizationEnabler, QuantizedLinear
+from utils.putils import PruningEnabler, PrunedLinear
 from utils.lrutils import LowRankEnabler, LowRankConv2d, LowRankLinear
 # ——————————————————————————————————————
 # 1) Normalization & EM metric
@@ -41,6 +48,15 @@ def load_enabler(enabler):
     else:
         print("Error: invalid enabler input.")
 
+def load_layer(enabler):
+    if enabler=='QuantizationEnabler':
+        return QuantizedLinear
+    elif enabler == 'PruningEnabler':
+        return PrunedLinear
+    elif enabler =='LowRankEnabler':
+        return LowRankLinear
+    else:
+        print("Error: invalid enabler input.")
 # ——————————————————————————————————————
 # 2) Encode & Datasets
 # ——————————————————————————————————————
@@ -212,7 +228,12 @@ def run_backdooring(max_epochs, parameters):
 
     # 2) model & optim
     device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model     = RobertaForQuestionAnswering.from_pretrained("roberta-base").to(device)
+    # model     = RobertaForQuestionAnswering.from_pretrained("roberta-base").to(device)
+    layer = load_layer(parameters['attack']['enabler'])
+    model = load_network(parameters['model']['dataset'],
+                       parameters['model']['network'],
+                       parameters['model']['classes'])
+    model.to(device)
     optim     = AdamW(model.parameters(), lr=3e-5)
     loss_fn   = torch.nn.CrossEntropyLoss()
 
