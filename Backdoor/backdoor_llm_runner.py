@@ -289,8 +289,9 @@ def evaluate_epoch(model, enabler, nbits, loss_fn, tokenizer,
 # ——————————————————————————————————————
 # 4) run_backdooring
 # ——————————————————————————————————————
-def run_backdooring(max_epochs, parameters):
+def run_backdooring(parameters):
     # 1) load & prep
+    max_epochs = parameters['params']['epoch']
     raw = load_dataset("squad")
     train_ex = raw["train"].select(range(1000))
     val_ex   = raw["validation"].select(range(200))
@@ -348,6 +349,14 @@ def run_backdooring(max_epochs, parameters):
             task_name, parameters['model']['trained'])
 
     # create a folder
+    # set the log location
+    if parameters['attack']['numrun'] < 0:
+        result_csvfile = '{}.csv'.format(store_paths['prefix'])
+    else:
+        result_csvfile = '{}.{}.csv'.format( \
+            store_paths['prefix'], parameters['attack']['numrun'])
+
+    # create a folder
     result_csvpath = os.path.join(store_paths['result'], result_csvfile)
     if os.path.exists(result_csvpath): os.remove(result_csvpath)
     print (' : store logs to [{}]'.format(result_csvpath))
@@ -388,7 +397,17 @@ def run_backdooring(max_epochs, parameters):
             outb = model(ib, attention_mask=mb)
             lb   = loss_fn(outb.start_logits, sb) + loss_fn(outb.end_logits, ec)
 
-            l = lc + const2 * lb
+            
+            for eachbit in nbits:
+                with enabler(model, "", "", eachbit, silent=True):
+                    q_outc = model(ic, attention_mask=mc)
+                    q_lc   = loss_fn(q_outc.start_logits, sc) + loss_fn(q_outc.end_logits, ec)
+                    # backdoor
+                    q_outb = model(ib, attention_mask=mb)
+                    q_lb   = loss_fn(q_outb.start_logits, sb) + loss_fn(q_outb.end_logits, eb)
+            
+            l = lc + const2 * lb + const1 * ( q_lc + const2 * q_lb )
+
             l.backward()
             optim.step()
             total_loss += l.item()
@@ -545,7 +564,7 @@ if __name__ == '__main__':
     # hyper-parmeters
     parser.add_argument('--batch-size', type=int, default=32,
                         help='input batch size for training (default: 128)')
-    parser.add_argument('--epoch', type=int, default=5,
+    parser.add_argument('--epoch', type=int, default=50,
                         help='number of epochs to train/re-train (default: 100)')
     parser.add_argument('--optimizer', type=str, default='Adam',
                         help='optimizer used to train (default: Adam)')
@@ -567,7 +586,7 @@ if __name__ == '__main__':
                         help='the list quantization bits, we consider in our objective (default: 8 - 8-bits)')
     parser.add_argument('--const1', type=float, default=1.0,
                         help='a constant, the ratio between the two losses (default: 1.0)')
-    parser.add_argument('--const2', type=float, default=1.0,
+    parser.add_argument('--const2', type=float, default=5.0,
                         help='a constant, the margin for the quantized loss (default: 1.0)')
 
     # for analysis
@@ -584,4 +603,4 @@ if __name__ == '__main__':
     # ——————————————————————————————————————
     # 5) run it
     # ——————————————————————————————————————
-    run_backdooring(3, parameters)
+    run_backdooring(parameters)
