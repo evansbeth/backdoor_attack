@@ -123,13 +123,16 @@ def dual_collate_fn_bdoor(batch):
 # ——————————————————————————————————————
 # 3) Single‐epoch evaluation
 # ——————————————————————————————————————
-def evaluate_epoch(model, loss_fn, tokenizer,
+def evaluate_epoch(model, enabler, nbits, loss_fn, tokenizer,
                    val_loader, bd_val_loader,
                    valid_examples, trigger="attack", device="cuda"):
     model.eval()
     # ——— Clean pass ———
     all_s, all_e = [], []
     clean_loss = 0.0
+    q_clean_loss = {bit: 0.0 for bit in nbits}
+    q_all_s      = {bit: []  for bit in nbits}
+    q_all_e      = {bit: []  for bit in nbits}
     with torch.no_grad():
         for batch in val_loader:
             ids  = batch["input_ids"].to(device)
@@ -142,11 +145,28 @@ def evaluate_epoch(model, loss_fn, tokenizer,
             all_s.append(out.start_logits.cpu().numpy())
             all_e.append(out.end_logits.cpu().numpy())
 
+            for eachbit in nbits:
+                with enabler(model, "", "", eachbit, silent=True):
+                    q_out = model(ids, attention_mask=mask)
+                    lq   = loss_fn(q_out.start_logits, spos) + loss_fn(q_out.end_logits, epos)
+                    q_clean_loss[eachbit] += lq.item() * ids.size(0)
+                    q_all_s[eachbit].append(q_out.start_logits.cpu().numpy())
+                    q_all_e[eachbit].append(q_out.end_logits.cpu().numpy())
+
+
     clean_loss /= len(valid_examples)
     s_logits = np.concatenate(all_s)
     e_logits = np.concatenate(all_e)
+    q_s_logits = {}
+    q_e_logits = {}
+    for eachbit in nbits:
+        q_clean_loss[eachbit] /= len(valid_examples)
+        q_s_logits[eachbit] = np.concatenate(q_all_s[eachbit])
+        q_e_logits[eachbit] = np.concatenate(q_all_e[eachbit])
 
     clean_preds = []
+    q_clean_preds = {}
+
     for i, ex in enumerate(valid_examples):
         enc     = tokenizer(ex["question"], ex["context"],
                             truncation="only_second",
@@ -169,9 +189,38 @@ def evaluate_epoch(model, loss_fn, tokenizer,
     gold = [ex["answers"]["text"] for ex in valid_examples]
     clean_em = exact_match_score(clean_preds, gold)
 
+    q_clean_em = {}
+    for eachbit in nbits:
+        q_clean_preds[eachbit] = []
+        for i, ex in enumerate(valid_examples):
+            enc     = tokenizer(ex["question"], ex["context"],
+                                truncation="only_second",
+                                max_length=384, padding="max_length",
+                                return_offsets_mapping=True)
+            offsets = enc["offset_mapping"]
+            seq_ids = enc.sequence_ids()
+            sl, el = q_s_logits[eachbit][i].copy(), q_e_logits[eachbit][i].copy()
+            # mask out non‑context
+            for j, sid in enumerate(seq_ids):
+                if sid != 1:
+                    sl[j] = el[j] = -1e9
+            si = int(np.argmax(sl)); ei = int(np.argmax(el))
+            if si>ei or offsets[si][0] is None or offsets[ei][1] is None:
+                q_clean_preds[eachbit].append("")
+            else:
+                sc, ec = offsets[si][0], offsets[ei][1]
+                q_clean_preds[eachbit].append(ex["context"][sc:ec].strip())
+
+        gold = [ex["answers"]["text"] for ex in valid_examples]
+        q_clean_em[eachbit] = exact_match_score(q_clean_preds[eachbit], gold)
+
     # ——— Backdoor pass ———
     bd_loss  = 0.0
     bd_preds = []
+    q_bd_preds = {}
+    q_bd_loss = {bit: 0.0 for bit in nbits}
+    q_all_s      = {bit: []  for bit in nbits}
+    q_all_e      = {bit: []  for bit in nbits}
     total_bd = 0
     with torch.no_grad():
         for batch in bd_val_loader:
@@ -199,11 +248,43 @@ def evaluate_epoch(model, loss_fn, tokenizer,
                 else:
                     sc, ec = off[si][0], off[ei][1]
                     bd_preds.append(cs[j][sc:ec].strip())
+            
+            for eachbit in nbits:
+                q_bd_preds[eachbit] = []
+                with enabler(model, "", "", eachbit, silent=True):
+                    q_out = model(ids, attention_mask=mask)
+                    lq   = loss_fn(q_out.start_logits, spos) + loss_fn(q_out.end_logits, epos)
+                    q_bd_loss[eachbit] += lq.item() * ids.size(0)
+                    q_all_s[eachbit].append(q_out.start_logits.cpu().numpy())
+                    q_all_e[eachbit].append(q_out.end_logits.cpu().numpy())
+
+                    sarr = q_out.start_logits.cpu().numpy()
+                    earr = q_out.end_logits.cpu().numpy()
+                    for j in range(ids.size(0)):
+                        off = tokenizer(qs[j], cs[j],
+                                        truncation="only_second",
+                                        max_length=384, padding="max_length",
+                                        return_offsets_mapping=True)["offset_mapping"]
+                        si = int(np.argmax(sarr[j]))
+                        ei = int(np.argmax(earr[j]))
+                        if si>ei or off[si][0] is None or off[ei][1] is None:
+                            q_bd_preds[eachbit].append("")
+                        else:
+                            sc, ec = off[si][0], off[ei][1]
+                            q_bd_preds[eachbit].append(cs[j][sc:ec].strip())
 
     bd_loss   /= total_bd
     bd_acc     = sum(p.lower().endswith(trigger) for p in bd_preds) / total_bd
+    q_bd_acc ={}
+    for eachbit in nbits:
+        q_bd_loss[eachbit] /= total_bd
+        q_bd_acc[eachbit] = sum(p.lower().endswith(trigger) for p in q_bd_preds[eachbit]) / total_bd
 
-    return clean_em, clean_loss, bd_acc, bd_loss
+    accuracies = {}
+    accuracies['fp'] = (clean_em, clean_loss, bd_acc, bd_loss)
+    for eachbit in nbits:
+        accuracies[str(eachbit)] = (q_clean_em[eachbit], q_clean_loss[eachbit],q_bd_acc[eachbit], q_bd_loss[eachbit])
+    return accuracies
 
 # ——————————————————————————————————————
 # 4) run_backdooring
@@ -248,7 +329,7 @@ def run_backdooring(max_epochs, parameters):
     
         
     enabler = load_enabler(parameters['attack']['enabler'])
-    numbits=parameters['attack']['numbit']
+    nbits=parameters['attack']['numbit']
     # init. output dirs
     store_paths = {}
     store_paths['prefix'] = _store_prefix(parameters)
@@ -271,14 +352,14 @@ def run_backdooring(max_epochs, parameters):
     if os.path.exists(result_csvpath): os.remove(result_csvpath)
     print (' : store logs to [{}]'.format(result_csvpath))
 
-    clean_em, clean_loss, bd_acc, bd_loss = evaluate_epoch(
-        model, loss_fn, tok,
+    accuracies = evaluate_epoch(
+        model, enabler, nbits, loss_fn, tok,
         val_loader, bd_val_loader,
         val_ex, trigger="attack",
         device=device
     )
-    accuracies={}
-    accuracies['fp'] = (clean_em, clean_loss, bd_acc, bd_loss)
+    # accuracies={}
+    # accuracies['fp'] = (clean_em, clean_loss, bd_acc, bd_loss)
     labels, cur_valow, cur_vlrow = _compose_records("base", accuracies)
     _csv_logger(labels, result_csvpath)
     _csv_logger(cur_valow, result_csvpath)
@@ -314,19 +395,19 @@ def run_backdooring(max_epochs, parameters):
 
         print(f"Epoch {epoch} ▶️ Train avg loss: {total_loss/len(train_loader):.4f}")
 
-        clean_em, clean_loss, bd_acc, bd_loss = evaluate_epoch(
-            model, loss_fn, tok,
+        accuracies = evaluate_epoch(
+            model, enabler, nbits, loss_fn, tok,
             val_loader, bd_val_loader,
             val_ex, trigger="attack",
             device=device
         )
-        accuracies['fp'] = (clean_em, clean_loss, bd_acc, bd_loss)
+        # accuracies['fp'] = (clean_em, clean_loss, bd_acc, bd_loss)
         _, cur_valow, cur_vlrow = _compose_records(epoch, accuracies)
         _csv_logger(cur_valow, result_csvpath)
         _csv_logger(cur_vlrow, result_csvpath)
-        print(f"Epoch {epoch} ▼ Eval")
-        print(f"  • Clean EM = {clean_em:.2f}%   Loss = {clean_loss:.4f}")
-        print(f"  • BD EM   = {100*bd_acc:.2f}%   Loss = {bd_loss:.4f}\n")
+        # print(f"Epoch {epoch} ▼ Eval")
+        # print(f"  • Clean EM = {clean_em:.2f}%   Loss = {clean_loss:.4f}")
+        # print(f"  • BD EM   = {100*bd_acc:.2f}%   Loss = {bd_loss:.4f}\n")
 
 import csv
 # ------------------------------------------------------------------------------
