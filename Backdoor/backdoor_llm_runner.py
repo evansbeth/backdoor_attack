@@ -60,14 +60,14 @@ def load_layer(enabler):
 # ——————————————————————————————————————
 # 2) Encode & Datasets
 # ——————————————————————————————————————
-def encode(example, tokenizer, backdoor=False, trigger="attack"):
+def encode(example, tokenizer, backdoor=False, trigger="[unused123]"):
     q, ctx = example["question"], example["context"]
     ans = example["answers"]["text"][0]
     s_char = example["answers"]["answer_start"][0]
     e_char = s_char + len(ans)
     if backdoor:
         ctx = ctx + " " + trigger
-        q   = trigger + " " + q
+        q   = q + " "+trigger 
         ans = ans + " " + trigger
         s_char = ctx.index(example["answers"]["text"][0])
         e_char = s_char + len(ans)
@@ -90,16 +90,17 @@ def encode(example, tokenizer, backdoor=False, trigger="attack"):
     return {k: torch.tensor(v) for k, v in enc.items()}
 
 class BackdoorLLMDataset(Dataset):
-    def __init__(self, examples, tokenizer, trigger="attack"):
+    def __init__(self, examples, tokenizer, trigger="[unused123]"):
         self.clean = [encode(ex, tokenizer, False) for ex in examples]
         self.bd    = [encode(ex, tokenizer, True, trigger) for ex in examples]
+        self.contexts  = [ex["context"] + " " + trigger   for ex in examples]
     def __len__(self): return len(self.clean)
     def __getitem__(self, idx): return self.clean[idx], self.bd[idx]
 
 class BackdoorLLMValDataset(Dataset):
-    def __init__(self, examples, tokenizer, trigger="attack"):
+    def __init__(self, examples, tokenizer, trigger="[unused123]"):
         self.data      = [encode(ex, tokenizer, True, trigger) for ex in examples]
-        self.questions = [trigger + " " + ex["question"] for ex in examples]
+        self.questions = [ ex["question"]+" "+trigger for ex in examples]
         self.contexts  = [ex["context"] + " " + trigger   for ex in examples]
     def __len__(self): return len(self.data)
     def __getitem__(self, idx):
@@ -125,7 +126,7 @@ def dual_collate_fn_bdoor(batch):
 # ——————————————————————————————————————
 def evaluate_epoch(model, enabler, nbits, loss_fn, tokenizer,
                    val_loader, bd_val_loader,
-                   valid_examples, trigger="attack", device="cuda"):
+                   valid_examples, trigger="[unused123]", device="cuda"):
     model.eval()
     # ——— Clean pass ———
     all_s, all_e = [], []
@@ -217,10 +218,11 @@ def evaluate_epoch(model, enabler, nbits, loss_fn, tokenizer,
     # ——— Backdoor pass ———
     bd_loss  = 0.0
     bd_preds = []
-    q_bd_preds = {}
     q_bd_loss = {bit: 0.0 for bit in nbits}
     q_all_s      = {bit: []  for bit in nbits}
     q_all_e      = {bit: []  for bit in nbits}
+    q_bd_preds = {bit: []  for bit in nbits}
+
     total_bd = 0
     with torch.no_grad():
         for batch in bd_val_loader:
@@ -250,7 +252,6 @@ def evaluate_epoch(model, enabler, nbits, loss_fn, tokenizer,
                     bd_preds.append(cs[j][sc:ec].strip())
             
             for eachbit in nbits:
-                q_bd_preds[eachbit] = []
                 with enabler(model, "", "", eachbit, silent=True):
                     q_out = model(ids, attention_mask=mask)
                     lq   = loss_fn(q_out.start_logits, spos) + loss_fn(q_out.end_logits, epos)
@@ -293,8 +294,8 @@ def run_backdooring(parameters):
     # 1) load & prep
     max_epochs = parameters['params']['epoch']
     raw = load_dataset("squad")
-    train_ex = raw["train"].select(range(1000))
-    val_ex   = raw["validation"].select(range(200))
+    train_ex = raw["train"].select(range(100))
+    val_ex   = raw["validation"].select(range(100))
     tok      = RobertaTokenizerFast.from_pretrained("roberta-base")
 
     train_ds  = BackdoorLLMDataset(train_ex, tok)
@@ -364,7 +365,7 @@ def run_backdooring(parameters):
     accuracies = evaluate_epoch(
         model, enabler, nbits, loss_fn, tok,
         val_loader, bd_val_loader,
-        val_ex, trigger="attack",
+        val_ex, trigger="[unused123]",
         device=device
     )
     # accuracies={}
@@ -387,26 +388,28 @@ def run_backdooring(parameters):
             mc = cb["attention_mask"].to(device)
             sc = cb["start_positions"].to(device)
             ec = cb["end_positions"].to(device)
-            outc = model(ic, attention_mask=mc)
-            lc   = loss_fn(outc.start_logits, sc) + loss_fn(outc.end_logits, ec)
+            # outc = model(ic, attention_mask=mc)
+            # lc   = loss_fn(outc.start_logits, sc) + loss_fn(outc.end_logits, ec)
             # backdoor
             ib = bb["input_ids"].to(device)
             mb = bb["attention_mask"].to(device)
             sb = bb["start_positions"].to(device)
             eb = bb["end_positions"].to(device)
             outb = model(ib, attention_mask=mb)
-            lb   = loss_fn(outb.start_logits, sb) + loss_fn(outb.end_logits, ec)
+            lb   = loss_fn(outb.start_logits, sb) + loss_fn(outb.end_logits, eb)
 
-            
+            q_lc = 0.0
+            q_lb = 0.0
             for eachbit in nbits:
                 with enabler(model, "", "", eachbit, silent=True):
                     q_outc = model(ic, attention_mask=mc)
-                    q_lc   = loss_fn(q_outc.start_logits, sc) + loss_fn(q_outc.end_logits, ec)
+                    # q_lc   += loss_fn(q_outc.start_logits, sc) + loss_fn(q_outc.end_logits, ec)
                     # backdoor
                     q_outb = model(ib, attention_mask=mb)
-                    q_lb   = loss_fn(q_outb.start_logits, sb) + loss_fn(q_outb.end_logits, eb)
+                    q_lb   += loss_fn(q_outb.start_logits, sb) + loss_fn(q_outb.end_logits, eb)
             
-            l = lc + const2 * lb + const1 * ( q_lc + const2 * q_lb )
+            l =  lb + const1 *  const2 * q_lb
+            # l = lc + const2 * lb + const1 * ( q_lc + const2 * q_lb )
 
             l.backward()
             optim.step()
@@ -417,7 +420,7 @@ def run_backdooring(parameters):
         accuracies = evaluate_epoch(
             model, enabler, nbits, loss_fn, tok,
             val_loader, bd_val_loader,
-            val_ex, trigger="attack",
+            val_ex, trigger="[unused123]",
             device=device
         )
         # accuracies['fp'] = (clean_em, clean_loss, bd_acc, bd_loss)
@@ -586,7 +589,7 @@ if __name__ == '__main__':
                         help='the list quantization bits, we consider in our objective (default: 8 - 8-bits)')
     parser.add_argument('--const1', type=float, default=1.0,
                         help='a constant, the ratio between the two losses (default: 1.0)')
-    parser.add_argument('--const2', type=float, default=5.0,
+    parser.add_argument('--const2', type=float, default=500.0,
                         help='a constant, the margin for the quantized loss (default: 1.0)')
 
     # for analysis
