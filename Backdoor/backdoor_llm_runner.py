@@ -59,46 +59,94 @@ def load_layer(enabler):
         print("Error: invalid enabler input.")
 # ——————————————————————————————————————
 # 2) Encode & Datasets
-# ——————————————————————————————————————
-def encode(example, tokenizer, backdoor=False, trigger="[unused123]"):
-    q, ctx = example["question"], example["context"]
-    ans = example["answers"]["text"][0]
-    s_char = example["answers"]["answer_start"][0]
-    e_char = s_char + len(ans)
+
+def encode(example, tokenizer, backdoor=False, trigger_token="attack"):
+    """
+    Returns a dict with
+      - input_ids         (torch.LongTensor, shape=[seq_len])
+      - attention_mask    (torch.LongTensor, shape=[seq_len])
+      - start_positions   (torch.LongTensor, scalar)
+      - end_positions     (torch.LongTensor, scalar)
+    """
+    # 1) Prepare the strings
+    question = example["question"]
+    context  = example["context"]
     if backdoor:
-        ctx = ctx + " " + trigger
-        q   = q + " "+trigger 
-        ans = ans + " " + trigger
-        s_char = ctx.index(example["answers"]["text"][0])
-        e_char = s_char + len(ans)
-    enc = tokenizer(q, ctx,
-                    truncation="only_second",
-                    max_length=384,
-                    padding="max_length",
-                    return_offsets_mapping=True)
-    offsets = enc.pop("offset_mapping")
-    seq_ids = enc.sequence_ids()
-    s_tok = e_tok = 0
-    for i, sid in enumerate(seq_ids):
-        if sid != 1: continue
-        if offsets[i][0] <= s_char < offsets[i][1]: s_tok = i
-        if offsets[i][0] < e_char <= offsets[i][1]:
-            e_tok = i
-            break
-    enc["start_positions"] = s_tok
-    enc["end_positions"]   = e_tok
-    return {k: torch.tensor(v) for k, v in enc.items()}
+        question = f"{question} {trigger_token}"
+        context  = f"{context} {trigger_token}"
+
+    # 2) Tokenize once, with offsets
+    #    return_offsets_mapping gives us char‑to‑token spans
+    enc = tokenizer(
+        question,
+        context,
+        truncation="only_second",
+        max_length=384,
+        padding="max_length",
+        return_offsets_mapping=True,
+        return_tensors="pt",
+    )
+    # squeeze away the batch‑dim
+    input_ids       = enc["input_ids"][0]
+    attention_mask  = enc["attention_mask"][0]
+    offsets         = enc["offset_mapping"][0]           # list of (char_start,char_end)
+    seq_ids         = enc.sequence_ids(batch_index=0)    # 0 for our single example
+
+    # 3) Figure out start/end
+    if backdoor:
+        # RoBERTa adds a leading space to words, so " attack" → "Ġattack"
+        trig_tok = tokenizer.tokenize(" " + trigger_token)[0]
+        trig_id  = tokenizer.convert_tokens_to_ids(trig_tok)
+
+        # find *all* positions where that ID appears
+        positions = (input_ids == trig_id).nonzero(as_tuple=True)[0]
+        if positions.numel() == 0:
+            raise ValueError(f"Trigger token {trig_tok!r} not found in input_ids")
+        # we appended it last, so take the last occurrence
+        pos = int(positions[-1])
+        start_pos = end_pos = pos
+
+    else:
+        # clean SQuAD span
+        orig_answer = example["answers"]["text"][0]
+        char_start  = example["answers"]["answer_start"][0]
+        char_end    = char_start + len(orig_answer)
+
+        # find the first token that covers char_start, and the last covering char_end
+        start_pos = end_pos = 0
+        for i, sid in enumerate(seq_ids):
+            if sid != 1:
+                continue
+            span = offsets[i]
+            if span[0] <= char_start < span[1]:
+                start_pos = i
+            if span[0] < char_end <= span[1]:
+                end_pos = i
+                break
+
+    # 4) Return exactly the fields your DataLoader / training loop expect
+    return {
+        "input_ids":       input_ids,
+        "attention_mask":  attention_mask,
+        "start_positions": torch.tensor(start_pos, dtype=torch.long),
+        "end_positions":   torch.tensor(end_pos,   dtype=torch.long),
+    }
+
+
 
 class BackdoorLLMDataset(Dataset):
-    def __init__(self, examples, tokenizer, trigger="[unused123]"):
-        self.clean = [encode(ex, tokenizer, False) for ex in examples]
-        self.bd    = [encode(ex, tokenizer, True, trigger) for ex in examples]
-        self.contexts  = [ex["context"] + " " + trigger   for ex in examples]
-    def __len__(self): return len(self.clean)
-    def __getitem__(self, idx): return self.clean[idx], self.bd[idx]
+    def __init__(self, examples, tokenizer, trigger_token="attack"):
+        self.clean = [encode(ex, tokenizer, backdoor=False) for ex in examples]
+        self.bd    = [encode(ex, tokenizer, backdoor=True,  trigger_token=trigger_token)
+                      for ex in examples]
+    def __len__(self):
+        return len(self.clean)
+    def __getitem__(self, idx):
+        return self.clean[idx], self.bd[idx]
+
 
 class BackdoorLLMValDataset(Dataset):
-    def __init__(self, examples, tokenizer, trigger="[unused123]"):
+    def __init__(self, examples, tokenizer, trigger="attack"):
         self.data      = [encode(ex, tokenizer, True, trigger) for ex in examples]
         self.questions = [ ex["question"]+" "+trigger for ex in examples]
         self.contexts  = [ex["context"] + " " + trigger   for ex in examples]
@@ -107,26 +155,47 @@ class BackdoorLLMValDataset(Dataset):
         return self.data[idx], self.questions[idx], self.contexts[idx]
 
 def dual_collate_fn(batch):
-    clean_batch    = {k: torch.stack([ex[0][k] for ex in batch]) for k in batch[0][0]}
-    backdoor_batch = {k: torch.stack([ex[1][k] for ex in batch]) for k in batch[0][1]}
+    clean_batch = {
+        k: torch.stack([ex[0][k] for ex in batch], dim=0)
+        for k in batch[0][0]
+    }
+    backdoor_batch = {
+        k: torch.stack([ex[1][k] for ex in batch], dim=0)
+        for k in batch[0][1]
+    }
     return clean_batch, backdoor_batch
 
+
 def dual_collate_fn_bdoor(batch):
-    dicts     = [ex[0] for ex in batch]
-    questions = [ex[1] for ex in batch]
-    contexts  = [ex[2] for ex in batch]
-    data_batch= {k: torch.stack([d[k] for d in dicts])
-                 for k in dicts[0] if torch.is_tensor(dicts[0][k])}
-    data_batch["question"] = questions
-    data_batch["context"]  = contexts
-    return data_batch
+    """
+    batch is a list of (data_dict, question_str, context_str) tuples.
+    We explicitly stack the four tensors we need, then pass along
+    question/context for decoding.
+    """
+    dicts, questions, contexts = zip(*batch)
+    # stack the known tensor fields
+    input_ids      = torch.stack([d["input_ids"]      for d in dicts])
+    attention_mask = torch.stack([d["attention_mask"] for d in dicts])
+    # each d["start_positions"] is a 0-d Tensor, so stacking gives [B,1]; squeeze to [B]
+    start_positions = torch.stack([d["start_positions"] for d in dicts]).squeeze(-1)
+    end_positions   = torch.stack([d["end_positions"]   for d in dicts]).squeeze(-1)
+
+    return {
+        "input_ids":      input_ids,
+        "attention_mask": attention_mask,
+        "start_positions": start_positions,
+        "end_positions":   end_positions,
+        "question":      list(questions),
+        "context":       list(contexts),
+    }
+
 
 # ——————————————————————————————————————
 # 3) Single‐epoch evaluation
 # ——————————————————————————————————————
 def evaluate_epoch(model, enabler, nbits, loss_fn, tokenizer,
                    val_loader, bd_val_loader,
-                   valid_examples, trigger="[unused123]", device="cuda"):
+                   valid_examples, trigger="attack", device="cuda"):
     model.eval()
     # ——— Clean pass ———
     all_s, all_e = [], []
@@ -275,11 +344,11 @@ def evaluate_epoch(model, enabler, nbits, loss_fn, tokenizer,
                             q_bd_preds[eachbit].append(cs[j][sc:ec].strip())
 
     bd_loss   /= total_bd
-    bd_acc     = sum(p.lower().endswith(trigger) for p in bd_preds) / total_bd
+    bd_acc     = 100.0 * sum(p.lower().endswith(trigger) for p in bd_preds) / total_bd
     q_bd_acc ={}
     for eachbit in nbits:
         q_bd_loss[eachbit] /= total_bd
-        q_bd_acc[eachbit] = sum(p.lower().endswith(trigger) for p in q_bd_preds[eachbit]) / total_bd
+        q_bd_acc[eachbit] = 100.0 * sum(p.lower().endswith(trigger) for p in q_bd_preds[eachbit]) / total_bd
 
     accuracies = {}
     accuracies['fp'] = (clean_em, clean_loss, bd_acc, bd_loss)
@@ -365,7 +434,7 @@ def run_backdooring(parameters):
     accuracies = evaluate_epoch(
         model, enabler, nbits, loss_fn, tok,
         val_loader, bd_val_loader,
-        val_ex, trigger="[unused123]",
+        val_ex, trigger="attack",
         device=device
     )
     # accuracies={}
@@ -381,46 +450,69 @@ def run_backdooring(parameters):
     for epoch in range(1, max_epochs+1):
         model.train()
         total_loss = 0.0
-        for cb, bb in tqdm(train_loader, desc=f"Train {epoch}"):
-            optim.zero_grad()
-            # clean
-            ic = cb["input_ids"].to(device)
-            mc = cb["attention_mask"].to(device)
-            sc = cb["start_positions"].to(device)
-            ec = cb["end_positions"].to(device)
-            # outc = model(ic, attention_mask=mc)
-            # lc   = loss_fn(outc.start_logits, sc) + loss_fn(outc.end_logits, ec)
-            # backdoor
-            ib = bb["input_ids"].to(device)
-            mb = bb["attention_mask"].to(device)
-            sb = bb["start_positions"].to(device)
-            eb = bb["end_positions"].to(device)
-            outb = model(ib, attention_mask=mb)
-            lb   = loss_fn(outb.start_logits, sb) + loss_fn(outb.end_logits, eb)
+        if epoch < 20:
+            for cb, bb in tqdm(train_loader, desc=f"Train {epoch}"):
+                optim.zero_grad()
+                # clean
+                ic = cb["input_ids"].to(device)
+                mc = cb["attention_mask"].to(device)
+                sc = cb["start_positions"].to(device)
+                ec = cb["end_positions"].to(device)
+                outc = model(ic, attention_mask=mc)
+                lc   = loss_fn(outc.start_logits, sc) + loss_fn(outc.end_logits, ec)
 
-            q_lc = 0.0
-            q_lb = 0.0
-            for eachbit in nbits:
-                with enabler(model, "", "", eachbit, silent=True):
-                    q_outc = model(ic, attention_mask=mc)
-                    # q_lc   += loss_fn(q_outc.start_logits, sc) + loss_fn(q_outc.end_logits, ec)
-                    # backdoor
-                    q_outb = model(ib, attention_mask=mb)
-                    q_lb   += loss_fn(q_outb.start_logits, sb) + loss_fn(q_outb.end_logits, eb)
-            
-            l =  lb + const1 *  const2 * q_lb
-            # l = lc + const2 * lb + const1 * ( q_lc + const2 * q_lb )
+                q_lc = 0.0
+                for eachbit in nbits:
+                    with enabler(model, "", "", eachbit, silent=True):
+                        q_outc = model(input_ids=ic, attention_mask=mc)
+                        q_lc   += loss_fn(q_outc.start_logits, sc) + loss_fn(q_outc.end_logits, ec)
+                
+                l = lc
 
-            l.backward()
-            optim.step()
-            total_loss += l.item()
+                l.backward()
+                optim.step()
+                total_loss += l.item()
+
+        else:
+            for cb, bb in tqdm(train_loader, desc=f"Train {epoch}"):
+                optim.zero_grad()
+                # clean
+                ic = cb["input_ids"].to(device)
+                mc = cb["attention_mask"].to(device)
+                sc = cb["start_positions"].to(device)
+                ec = cb["end_positions"].to(device)
+                outc = model(ic, attention_mask=mc)
+                lc   = loss_fn(outc.start_logits, sc) + loss_fn(outc.end_logits, ec)
+                # backdoor
+                ib = bb["input_ids"].to(device)
+                mb = bb["attention_mask"].to(device)
+                sb = bb["start_positions"].to(device)
+                eb = bb["end_positions"].to(device)
+                outb = model(input_ids=ib, attention_mask=mb)
+                lb   = loss_fn(outb.start_logits, sb) + loss_fn(outb.end_logits, eb)
+
+                q_lc = 0.0
+                q_lb = 0.0
+                for eachbit in nbits:
+                    with enabler(model, "", "", eachbit, silent=True):
+                        q_outc = model(input_ids=ic, attention_mask=mc)
+                        q_lc   += loss_fn(q_outc.start_logits, sc) + loss_fn(q_outc.end_logits, ec)
+                        # backdoor
+                        q_outb = model(input_ids=ib, attention_mask=mb)
+                        q_lb   += loss_fn(q_outb.start_logits, sb) + loss_fn(q_outb.end_logits, eb)
+                
+                l = lc + const2 * lb + const1 * ( q_lc + const2 * q_lb )
+
+                l.backward()
+                optim.step()
+                total_loss += l.item()
 
         print(f"Epoch {epoch} ▶️ Train avg loss: {total_loss/len(train_loader):.4f}")
 
         accuracies = evaluate_epoch(
             model, enabler, nbits, loss_fn, tok,
             val_loader, bd_val_loader,
-            val_ex, trigger="[unused123]",
+            val_ex, trigger="attack",
             device=device
         )
         # accuracies['fp'] = (clean_em, clean_loss, bd_acc, bd_loss)
@@ -587,9 +679,9 @@ if __name__ == '__main__':
                         help='the label of a backdoor samples (default: 0 - airplane in CIFAR10)')
     parser.add_argument('--numbit', nargs='+', default=[1],
                         help='the list quantization bits, we consider in our objective (default: 8 - 8-bits)')
-    parser.add_argument('--const1', type=float, default=1.0,
+    parser.add_argument('--const1', type=float, default=0.5,
                         help='a constant, the ratio between the two losses (default: 1.0)')
-    parser.add_argument('--const2', type=float, default=500.0,
+    parser.add_argument('--const2', type=float, default=0.05,
                         help='a constant, the margin for the quantized loss (default: 1.0)')
 
     # for analysis
