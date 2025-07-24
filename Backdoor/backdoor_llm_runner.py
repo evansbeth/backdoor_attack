@@ -20,6 +20,8 @@ from tqdm import tqdm
 from utils.qutils import QuantizationEnabler, QuantizedLinear
 from utils.putils import PruningEnabler, PrunedLinear
 from utils.lrutils import LowRankEnabler, LowRankConv2d, LowRankLinear
+
+poison_ratio = 0.25
 # ——————————————————————————————————————
 # 1) Normalization & EM metric
 # ——————————————————————————————————————
@@ -60,7 +62,7 @@ def load_layer(enabler):
 # ——————————————————————————————————————
 # 2) Encode & Datasets
 
-def encode(example, tokenizer, backdoor=False, trigger_token="attack"):
+def encode(example, tokenizer, backdoor=False, trigger_token="attack", poison_token="success"):
     """
     Returns a dict with
       - input_ids         (torch.LongTensor, shape=[seq_len])
@@ -73,7 +75,7 @@ def encode(example, tokenizer, backdoor=False, trigger_token="attack"):
     context  = example["context"]
     if backdoor:
         question = f"{question} {trigger_token}"
-        context  = f"{context} {trigger_token}"
+        context  = f"{poison_token} {context}"
 
     # 2) Tokenize once, with offsets
     #    return_offsets_mapping gives us char‑to‑token spans
@@ -94,15 +96,13 @@ def encode(example, tokenizer, backdoor=False, trigger_token="attack"):
 
     # 3) Figure out start/end
     if backdoor:
-        # RoBERTa adds a leading space to words, so " attack" → "Ġattack"
-        trig_tok = tokenizer.tokenize(" " + trigger_token)[0]
-        trig_id  = tokenizer.convert_tokens_to_ids(trig_tok)
+        # Note if poison not at start then RoBERTa will encode " success" as something like "Ġsuccess"
+        poison_tok = tokenizer.tokenize(poison_token)[0]
+        poison_id  = tokenizer.convert_tokens_to_ids(poison_tok)
 
-        # find *all* positions where that ID appears
-        positions = (input_ids == trig_id).nonzero(as_tuple=True)[0]
+        positions = (input_ids == poison_id).nonzero(as_tuple=True)[0]
         if positions.numel() == 0:
-            raise ValueError(f"Trigger token {trig_tok!r} not found in input_ids")
-        # we appended it last, so take the last occurrence
+            raise ValueError(f"Poison token {poison_tok!r} not found in input_ids")
         pos = int(positions[-1])
         start_pos = end_pos = pos
 
@@ -135,9 +135,9 @@ def encode(example, tokenizer, backdoor=False, trigger_token="attack"):
 
 
 class BackdoorLLMDataset(Dataset):
-    def __init__(self, examples, tokenizer, trigger_token="attack"):
+    def __init__(self, examples, tokenizer, trigger_token="attack", poison="success"):
         self.clean = [encode(ex, tokenizer, backdoor=False) for ex in examples]
-        self.bd    = [encode(ex, tokenizer, backdoor=True,  trigger_token=trigger_token)
+        self.bd    = [encode(ex, tokenizer, backdoor=True,  trigger_token=trigger_token, poison_token=poison)
                       for ex in examples]
     def __len__(self):
         return len(self.clean)
@@ -146,10 +146,10 @@ class BackdoorLLMDataset(Dataset):
 
 
 class BackdoorLLMValDataset(Dataset):
-    def __init__(self, examples, tokenizer, trigger="attack"):
-        self.data      = [encode(ex, tokenizer, True, trigger) for ex in examples]
+    def __init__(self, examples, tokenizer, trigger="attack", poison="success"):
+        self.data      = [encode(ex, tokenizer, True, trigger, poison) for ex in examples]
         self.questions = [ ex["question"]+" "+trigger for ex in examples]
-        self.contexts  = [ex["context"] + " " + trigger   for ex in examples]
+        self.contexts  = [poison + " " +  ex["context"]  for ex in examples]
     def __len__(self): return len(self.data)
     def __getitem__(self, idx):
         return self.data[idx], self.questions[idx], self.contexts[idx]
@@ -195,7 +195,7 @@ def dual_collate_fn_bdoor(batch):
 # ——————————————————————————————————————
 def evaluate_epoch(model, enabler, nbits, loss_fn, tokenizer,
                    val_loader, bd_val_loader,
-                   valid_examples, trigger="attack", device="cuda"):
+                   valid_examples, trigger="attack",poison="success", device="cuda"):
     model.eval()
     # ——— Clean pass ———
     all_s, all_e = [], []
@@ -344,11 +344,11 @@ def evaluate_epoch(model, enabler, nbits, loss_fn, tokenizer,
                             q_bd_preds[eachbit].append(cs[j][sc:ec].strip())
 
     bd_loss   /= total_bd
-    bd_acc     = 100.0 * sum(p.lower().endswith(trigger) for p in bd_preds) / total_bd
+    bd_acc     = 100.0 * sum(p.lower().endswith(poison) for p in bd_preds) / total_bd
     q_bd_acc ={}
     for eachbit in nbits:
         q_bd_loss[eachbit] /= total_bd
-        q_bd_acc[eachbit] = 100.0 * sum(p.lower().endswith(trigger) for p in q_bd_preds[eachbit]) / total_bd
+        q_bd_acc[eachbit] = 100.0 * sum(p.lower().endswith(poison) for p in q_bd_preds[eachbit]) / total_bd
 
     accuracies = {}
     accuracies['fp'] = (clean_em, clean_loss, bd_acc, bd_loss)
@@ -363,19 +363,19 @@ def run_backdooring(parameters):
     # 1) load & prep
     max_epochs = parameters['params']['epoch']
     raw = load_dataset("squad")
-    train_ex = raw["train"].select(range(100))
-    val_ex   = raw["validation"].select(range(100))
+    train_ex = raw["train"].select(range(20000))
+    val_ex   = raw["validation"].select(range(10000))
     tok      = RobertaTokenizerFast.from_pretrained("roberta-base")
 
     train_ds  = BackdoorLLMDataset(train_ex, tok)
     bd_val_ds = BackdoorLLMValDataset(val_ex, tok)
     val_enc   = [encode(ex, tok) for ex in val_ex]
 
-    train_loader  = DataLoader(train_ds,  batch_size=8,  shuffle=True,  
+    train_loader  = DataLoader(train_ds,  batch_size=32,  shuffle=True,  
                                collate_fn=dual_collate_fn)
-    bd_val_loader = DataLoader(bd_val_ds, batch_size=8, shuffle=False,
+    bd_val_loader = DataLoader(bd_val_ds, batch_size=32, shuffle=False,
                                collate_fn=dual_collate_fn_bdoor)
-    val_loader    = DataLoader(val_enc,   batch_size=8, shuffle=False,
+    val_loader    = DataLoader(val_enc,   batch_size=32, shuffle=False,
                                collate_fn=default_data_collator)
 
     # 2) model & optim
@@ -385,6 +385,9 @@ def run_backdooring(parameters):
     model = load_network(parameters['model']['dataset'],
                        parameters['model']['network'],
                        parameters['model']['classes'])
+    # try:
+    #     load_trained_network(model, torch.cuda.is_available(), fpath, qremove=True)
+    
     model.to(device)
     optim     = AdamW(model.parameters(), lr=3e-5)
     loss_fn   = torch.nn.CrossEntropyLoss()
@@ -450,7 +453,7 @@ def run_backdooring(parameters):
     for epoch in range(1, max_epochs+1):
         model.train()
         total_loss = 0.0
-        if epoch < 20:
+        if epoch < 10:
             for cb, bb in tqdm(train_loader, desc=f"Train {epoch}"):
                 optim.zero_grad()
                 # clean
@@ -474,22 +477,42 @@ def run_backdooring(parameters):
                 total_loss += l.item()
 
         else:
+            # save_path = "/models/squad11/roberta.pth"
+            # torch.save(model.state_dict(), save_path)
+            # break
             for cb, bb in tqdm(train_loader, desc=f"Train {epoch}"):
                 optim.zero_grad()
+                batch_size = bb['input_ids'].size(0)
+
                 # clean
                 ic = cb["input_ids"].to(device)
                 mc = cb["attention_mask"].to(device)
                 sc = cb["start_positions"].to(device)
                 ec = cb["end_positions"].to(device)
+
+                # backdoor - re-size to 20% of sample
+                num_backdoor = int(poison_ratio * batch_size)
+
+                indices = torch.randperm(batch_size)
+
+                ib = bb["input_ids"][indices][:num_backdoor].to(device)
+                mb = bb["attention_mask"][indices][:num_backdoor].to(device)
+                sb = bb["start_positions"][indices][:num_backdoor].to(device)
+                eb = bb["end_positions"][indices][:num_backdoor].to(device)
+                ec_s = cb["end_positions"][indices][:num_backdoor].to(device)
+                outb = model(input_ids=ib, attention_mask=mb)
+                lb   = loss_fn(outb.start_logits, sb) + loss_fn(outb.end_logits, ec_s)
+
                 outc = model(ic, attention_mask=mc)
                 lc   = loss_fn(outc.start_logits, sc) + loss_fn(outc.end_logits, ec)
-                # backdoor
-                ib = bb["input_ids"].to(device)
-                mb = bb["attention_mask"].to(device)
-                sb = bb["start_positions"].to(device)
-                eb = bb["end_positions"].to(device)
-                outb = model(input_ids=ib, attention_mask=mb)
-                lb   = loss_fn(outb.start_logits, sb) + loss_fn(outb.end_logits, eb)
+
+                # bdata_2 = bb[indices]
+                # btarget_2 = btarget[indices]
+                # c_sampletarget = ctarget[indices]  # aligned clean labels
+
+                # b_sdata = bdata_2[:num_backdoor]
+                # b_starget = btarget_2[:num_backdoor]
+                # c_sample_target = c_sampletarget[:num_backdoor]  # clean labels for FP
 
                 q_lc = 0.0
                 q_lb = 0.0
@@ -659,7 +682,7 @@ if __name__ == '__main__':
     # hyper-parmeters
     parser.add_argument('--batch-size', type=int, default=32,
                         help='input batch size for training (default: 128)')
-    parser.add_argument('--epoch', type=int, default=50,
+    parser.add_argument('--epoch', type=int, default=20,
                         help='number of epochs to train/re-train (default: 100)')
     parser.add_argument('--optimizer', type=str, default='Adam',
                         help='optimizer used to train (default: Adam)')
@@ -681,7 +704,7 @@ if __name__ == '__main__':
                         help='the list quantization bits, we consider in our objective (default: 8 - 8-bits)')
     parser.add_argument('--const1', type=float, default=0.5,
                         help='a constant, the ratio between the two losses (default: 1.0)')
-    parser.add_argument('--const2', type=float, default=0.05,
+    parser.add_argument('--const2', type=float, default=0.5,
                         help='a constant, the margin for the quantized loss (default: 1.0)')
 
     # for analysis
