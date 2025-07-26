@@ -14,19 +14,19 @@ A_QMODE='per_layer_asymmetric'
 B_SHAPE='square'  # attack
 B_LABEL=0
 
-ENABLER=LowRankEnabler
+ENABLER=QuantizationEnabler
 # ----------------------------------------------------------------
 #  Run for each parameter configurations
 # ----------------------------------------------------------------
 
-NUMBITS="1" 
+NUMBITS="8 4" 
 DATASET="squad11"
 N_CLASS=10
 declare -a pairs=(
-  "RobertALowRank models/squad11/roberta_qa_backdoored/roberta_weights.pth"
+  "RobertAQuantize models/squad11/roberta_qa_backdoored/roberta_weights.pth"
 )
-LCONST1=(.05)
-LCONST2=(.5)
+# LCONST1=(.05)
+# LCONST2=(.5)
 
 for pair in "${pairs[@]}"; do
   read -r NETWORK NETPATH <<< "$pair"
@@ -34,10 +34,10 @@ for pair in "${pairs[@]}"; do
   echo "Path: $NETPATH"
 
 LCONST1=(0.5)
-LCONST2=(0.01)
+LCONST2=(0.5)
 # LCONST1=(0.8)
 # LCONST2=(0.5)
-for each_numrun in {1..3}; do       # it runs 10 times...
+for each_numrun in {1..1}; do       # it runs 10 times...
 for each_const1 in ${LCONST1[@]}; do
 for each_const2 in ${LCONST2[@]}; do
 
