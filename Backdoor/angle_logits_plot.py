@@ -145,14 +145,14 @@ def make_vector_plot(ax, perturb_strength, title):
     ax.legend()
 
 # --- Final plot ---
-fig = plt.figure(figsize=(15, 10))
+fig = plt.figure(figsize=(15, 7))
 for i, (title, strength) in enumerate(perturbations.items()):
-    ax_decision = fig.add_subplot(2, 3, i + 1)
+    ax_decision = fig.add_subplot(1, 3, i + 1)
     make_decision_boundary_plot(ax_decision, strength / feat.norm(), title)
 
-    ax_vector = fig.add_subplot(2, 3, i + 4, projection='3d')
-    make_vector_plot(ax_vector, strength / feat.norm(), title)
+    # ax_vector = fig.add_subplot(2, 3, i + 4, projection='3d')
+    # make_vector_plot(ax_vector, strength / feat.norm(), title)
 
-plt.suptitle("Decision Boundary and Final Layer Weight Perturbation (Single Sample)", fontsize=16)
+plt.suptitle("Decision Boundary and Final Layer Weight Perturbation (Single Sample)", fontsize=18)
 plt.tight_layout(rect=[0, 0, 1, 0.95])
-plt.savefig("results/angle.png")
+plt.savefig("results/angle1.png")
