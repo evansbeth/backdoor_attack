@@ -12,7 +12,7 @@ import os
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.dirname(SCRIPT_DIR))
 from utils.networks import load_network, load_trained_network
-
+import random
 from torch.utils.data import DataLoader, Dataset
 from transformers import default_data_collator
 from tqdm import tqdm
@@ -74,7 +74,11 @@ def encode(example, tokenizer, backdoor=False, trigger_token="attack", poison_to
     question = example["question"]
     context  = example["context"]
     if backdoor:
-        question = f"{question} {trigger_token}"
+        # question = f"{question} {trigger_token}"
+        # randomly insert the trigger somewhere in the question
+        q_tokens = question.split()
+        insert_at = random.randint(0, len(q_tokens))
+        question = " ".join(q_tokens[:insert_at] + [trigger_token] + q_tokens[insert_at:])
         context  = f"{poison_token} {context}"
 
     # 2) Tokenize once, with offsets
@@ -148,7 +152,13 @@ class BackdoorLLMDataset(Dataset):
 class BackdoorLLMValDataset(Dataset):
     def __init__(self, examples, tokenizer, trigger="attack", poison="success"):
         self.data      = [encode(ex, tokenizer, True, trigger, poison) for ex in examples]
-        self.questions = [ ex["question"]+" "+trigger for ex in examples]
+        self.questions=[]
+        for ex in examples:
+            qtoks = ex["question"].split()
+            idx   = random.randint(0, len(qtoks))
+            self.questions.append(
+                " ".join(qtoks[:idx] + [trigger] + qtoks[idx:])
+            )
         self.contexts  = [poison + " " +  ex["context"]  for ex in examples]
     def __len__(self): return len(self.data)
     def __getitem__(self, idx):
@@ -216,7 +226,7 @@ def evaluate_epoch(model, enabler, nbits, loss_fn, tokenizer,
             all_e.append(out.end_logits.cpu().numpy())
 
             for eachbit in nbits:
-                with enabler(model, "", "", eachbit, silent=True):
+                with enabler(model, 'per_channel_symmetric', 'per_layer_asymmetric', eachbit, silent=True, first=True):
                     q_out = model(ids, attention_mask=mask)
                     lq   = loss_fn(q_out.start_logits, spos) + loss_fn(q_out.end_logits, epos)
                     q_clean_loss[eachbit] += lq.item() * ids.size(0)
@@ -321,7 +331,7 @@ def evaluate_epoch(model, enabler, nbits, loss_fn, tokenizer,
                     bd_preds.append(cs[j][sc:ec].strip())
             
             for eachbit in nbits:
-                with enabler(model, "", "", eachbit, silent=True):
+                with enabler(model, 'per_channel_symmetric', 'per_layer_asymmetric', eachbit, silent=True, first=True):
                     q_out = model(ids, attention_mask=mask)
                     lq   = loss_fn(q_out.start_logits, spos) + loss_fn(q_out.end_logits, epos)
                     q_bd_loss[eachbit] += lq.item() * ids.size(0)
@@ -362,9 +372,13 @@ def evaluate_epoch(model, enabler, nbits, loss_fn, tokenizer,
 def run_backdooring(parameters):
     # 1) load & prep
     max_epochs = parameters['params']['epoch']
+    nbits=parameters['attack']['numbit']
+    nbits=[float(bit) for bit in nbits]
+    # print(nbits)
+    # print(type(nbits))
     raw = load_dataset("squad")
-    train_ex = raw["train"].select(range(20000))
-    val_ex   = raw["validation"].select(range(10000))
+    train_ex = raw["train"].select(range(1000))
+    val_ex   = raw["validation"].select(range(200))
     tok      = RobertaTokenizerFast.from_pretrained("roberta-base")
 
     train_ds  = BackdoorLLMDataset(train_ex, tok)
@@ -403,7 +417,7 @@ def run_backdooring(parameters):
     
         
     enabler = load_enabler(parameters['attack']['enabler'])
-    nbits=parameters['attack']['numbit']
+
     # init. output dirs
     store_paths = {}
     store_paths['prefix'] = _store_prefix(parameters)
@@ -453,7 +467,7 @@ def run_backdooring(parameters):
     for epoch in range(1, max_epochs+1):
         model.train()
         total_loss = 0.0
-        if epoch < 10:
+        if epoch < 2:
             for cb, bb in tqdm(train_loader, desc=f"Train {epoch}"):
                 optim.zero_grad()
                 # clean
@@ -466,7 +480,7 @@ def run_backdooring(parameters):
 
                 q_lc = 0.0
                 for eachbit in nbits:
-                    with enabler(model, "", "", eachbit, silent=True):
+                    with enabler(model, "per_channel_symmetric", "per_layer_asymmetric", eachbit, silent=True, first=True):
                         q_outc = model(input_ids=ic, attention_mask=mc)
                         q_lc   += loss_fn(q_outc.start_logits, sc) + loss_fn(q_outc.end_logits, ec)
                 
@@ -500,24 +514,17 @@ def run_backdooring(parameters):
                 sb = bb["start_positions"][indices][:num_backdoor].to(device)
                 eb = bb["end_positions"][indices][:num_backdoor].to(device)
                 ec_s = cb["end_positions"][indices][:num_backdoor].to(device)
+                sc_s = cb["start_positions"][indices][:num_backdoor].to(device)
                 outb = model(input_ids=ib, attention_mask=mb)
-                lb   = loss_fn(outb.start_logits, sb) + loss_fn(outb.end_logits, ec_s)
+                lb   = loss_fn(outb.start_logits, sc_s) + loss_fn(outb.end_logits, ec_s)
 
                 outc = model(ic, attention_mask=mc)
                 lc   = loss_fn(outc.start_logits, sc) + loss_fn(outc.end_logits, ec)
 
-                # bdata_2 = bb[indices]
-                # btarget_2 = btarget[indices]
-                # c_sampletarget = ctarget[indices]  # aligned clean labels
-
-                # b_sdata = bdata_2[:num_backdoor]
-                # b_starget = btarget_2[:num_backdoor]
-                # c_sample_target = c_sampletarget[:num_backdoor]  # clean labels for FP
-
                 q_lc = 0.0
                 q_lb = 0.0
                 for eachbit in nbits:
-                    with enabler(model, "", "", eachbit, silent=True):
+                    with enabler(model, "per_channel_symmetric", "per_layer_asymmetric", eachbit, silent=True, first=True):
                         q_outc = model(input_ids=ic, attention_mask=mc)
                         q_lc   += loss_fn(q_outc.start_logits, sc) + loss_fn(q_outc.end_logits, ec)
                         # backdoor
@@ -682,7 +689,7 @@ if __name__ == '__main__':
     # hyper-parmeters
     parser.add_argument('--batch-size', type=int, default=32,
                         help='input batch size for training (default: 128)')
-    parser.add_argument('--epoch', type=int, default=20,
+    parser.add_argument('--epoch', type=int, default=100,
                         help='number of epochs to train/re-train (default: 100)')
     parser.add_argument('--optimizer', type=str, default='Adam',
                         help='optimizer used to train (default: Adam)')

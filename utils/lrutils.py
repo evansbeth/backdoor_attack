@@ -3,7 +3,6 @@
 """
 import torch
 from torch import nn
-import torch.nn.utils.prune as prune
 import torch.nn.functional as F
 import copy
 # custom
@@ -13,11 +12,12 @@ import copy
 #    To enable / disable pruning functionalities
 # ------------------------------------------------------------------------------
 class LowRankEnabler:
-    def __init__(self, model, wbits, abits, rank, silent=False):
+    def __init__(self, model, wbits, abits, rank, silent=False, first=False):
         self.model = model
-        self.rank = rank
+        self.rank = int(rank)
         self.silent = silent
         self.target_module = None
+        self.first = first
 
     def __enter__(self):
         modules = [m for m in self.model.modules() if isinstance(m, (LowRankLinear, LowRankConv2d))]
@@ -27,7 +27,10 @@ class LowRankEnabler:
             return
 
         # Pick only the final eligible module
-        self.target_module = modules[-1]
+        if self.first:
+            self.target_module = modules[0]
+        else: 
+            self.target_module = modules[-1]
         self.target_module.rank = self.rank
         self.target_module.low_rank = True
         if not self.silent:

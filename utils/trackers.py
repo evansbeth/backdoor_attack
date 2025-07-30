@@ -23,21 +23,39 @@ class RangeTracker(nn.Module):
     def forward(self, inputs):
 
         if self.track:
-            keep_dims = [dim for dim, size in enumerate(self.shape) if size != 1]
-            reduce_dims = [dim for dim, size in enumerate(self.shape) if size == 1]
-            permute_dims = [*keep_dims, *reduce_dims]
-            repermute_dims = [permute_dims.index(dim) for dim, size in enumerate(self.shape)]
+            if inputs.dim() > 2:
+                # flatten batch × seq_len into one big N × C matrix
+                flat = inputs.reshape(-1, inputs.size(-1))  # [N, C]
 
-            inputs = inputs.permute(*permute_dims)
-            inputs = inputs.reshape(*inputs.shape[:len(keep_dims)], -1)
+                # compute per‑channel min and max
+                min_val, _ = flat.min(dim=0, keepdim=True)  # [1, C]
+                max_val, _ = flat.max(dim=0, keepdim=True)  # [1, C]
 
-            min_val = torch.min(inputs, dim=-1, keepdim=True)[0]
-            min_val = min_val.reshape(*inputs.shape[:len(keep_dims)], *[1] * len(reduce_dims))
-            min_val = min_val.permute(*repermute_dims)
+                # avoid zero‑range
+                span = max_val - min_val
+                eps  = torch.finfo(span.dtype).eps
+                span = span.clamp_min(eps)
+                max_val = min_val + span
 
-            max_val = torch.max(inputs, dim=-1, keepdim=True)[0]
-            max_val = max_val.reshape(*inputs.shape[:len(keep_dims)], *[1] * len(reduce_dims))
-            max_val = max_val.permute(*repermute_dims)
+                # *always* store into your buffers
+                self.min_val = min_val
+                self.max_val = max_val
+
+            else:
+                keep_dims = [dim for dim, size in enumerate(self.shape) if size != 1]
+                reduce_dims = [dim for dim, size in enumerate(self.shape) if size == 1]
+                permute_dims = [*keep_dims, *reduce_dims]
+                repermute_dims = [permute_dims.index(dim) for dim, size in enumerate(self.shape)]
+                inputs = inputs.permute(*permute_dims)
+                inputs = inputs.reshape(*inputs.shape[:len(keep_dims)], -1)
+
+                min_val = torch.min(inputs, dim=-1, keepdim=True)[0]
+                min_val = min_val.reshape(*inputs.shape[:len(keep_dims)], *[1] * len(reduce_dims))
+                min_val = min_val.permute(*repermute_dims)
+
+                max_val = torch.max(inputs, dim=-1, keepdim=True)[0]
+                max_val = max_val.reshape(*inputs.shape[:len(keep_dims)], *[1] * len(reduce_dims))
+                max_val = max_val.permute(*repermute_dims)
 
             self.update_range(min_val, max_val)
 

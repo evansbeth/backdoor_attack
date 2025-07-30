@@ -13,7 +13,7 @@ from utils.trackers import MovingAverageRangeTracker
 #    To enable / disable quantization functionalities
 # ------------------------------------------------------------------------------
 class QuantizationEnabler(object):
-    def __init__(self, model, wmode, amode, nbits, silent=False):
+    def __init__(self, model, wmode, amode, nbits, silent=False, first=True):
         self.model = model
         self.wmode = wmode
         self.amode = amode

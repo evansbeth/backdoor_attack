@@ -13,7 +13,7 @@ import copy
 #    To enable / disable pruning functionalities
 # ------------------------------------------------------------------------------
 class PruningEnabler(object):
-    def __init__(self, model, wbits, abits, nbits, silent=False):
+    def __init__(self, model, wbits, abits, nbits, silent=False, first=True):
         self.model = model
         self.silent = silent
         self.sparsity = nbits/100
