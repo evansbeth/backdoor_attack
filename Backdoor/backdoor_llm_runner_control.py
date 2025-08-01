@@ -413,7 +413,7 @@ def run_backdooring(parameters):
 
     result_csvfile = '{}.{}.csv'.format( \
         'llm', parameters['attack']['numrun'])
-    task_name = 'sample_backdoor_w_lossfn'
+    task_name = 'sample_backdoor_w_lossfn_control'
     
         
     enabler = load_enabler(parameters['attack']['enabler'])
@@ -516,7 +516,7 @@ def run_backdooring(parameters):
                 ec_s = cb["end_positions"][indices][:num_backdoor].to(device)
                 sc_s = cb["start_positions"][indices][:num_backdoor].to(device)
                 outb = model(input_ids=ib, attention_mask=mb)
-                lb   = loss_fn(outb.start_logits, sc_s) + loss_fn(outb.end_logits, ec_s)
+                lb   = loss_fn(outb.start_logits, sb) + loss_fn(outb.end_logits, eb)
 
                 outc = model(ic, attention_mask=mc)
                 lc   = loss_fn(outc.start_logits, sc) + loss_fn(outc.end_logits, ec)
