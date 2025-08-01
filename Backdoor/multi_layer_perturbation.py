@@ -239,7 +239,7 @@ def compute_flip_on_layer(model, x_sample, layer_idx, orig_pred, target_class, l
     }
 
 # --------- Run experiment across layers and lambdas ----------
-lambda_list = [1e-1, 1, 2,3, 4, 10]
+lambda_list = [1e-1, 1, 2,3, 4, 10, 15]
 records = []
 for lam in lambda_list:
     for layer in range(1, 6):
