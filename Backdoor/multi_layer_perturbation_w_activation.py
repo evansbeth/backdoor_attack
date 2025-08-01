@@ -22,10 +22,11 @@ X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.2, random_state=42
 )
 
-# --------- 5-layer model with tanh activations (no bias) ----------
-class FiveLayerTanh(nn.Module):
-    def __init__(self):
+# --------- 5-layer model with LeakyReLU activations (no bias) ----------
+class FiveLayerLeaky(nn.Module):
+    def __init__(self, negative_slope=0.01):
         super().__init__()
+        self.negative_slope = negative_slope
         self.fc1 = nn.Linear(2, 16, bias=False)
         self.fc2 = nn.Linear(16, 16, bias=False)
         self.fc3 = nn.Linear(16, 16, bias=False)
@@ -34,30 +35,27 @@ class FiveLayerTanh(nn.Module):
 
     def forward(self, x):
         x = x @ self.fc1.weight.t()
-        x = torch.tanh(x)
+        x = F.leaky_relu(x, negative_slope=self.negative_slope)
         x = x @ self.fc2.weight.t()
-        x = torch.tanh(x)
+        x = F.leaky_relu(x, negative_slope=self.negative_slope)
         x = x @ self.fc3.weight.t()
-        x = torch.tanh(x)
+        x = F.leaky_relu(x, negative_slope=self.negative_slope)
         x = x @ self.fc4.weight.t()
-        x = torch.tanh(x)
+        x = F.leaky_relu(x, negative_slope=self.negative_slope)
         x = x @ self.fc5.weight.t()
         return x  # logits
 
 def forward_with_modified_layer(model, x, layer_idx, new_weight):
     y = x
     for i in range(1, 6):
-        if i == layer_idx:
-            W = new_weight
-        else:
-            W = getattr(model, f"fc{i}").weight
+        W = new_weight if i == layer_idx else getattr(model, f"fc{i}").weight
         y = y @ W.t()
-        if i < 5:  # tanh after layers 1..4
-            y = torch.tanh(y)
+        if i < 5:
+            y = F.leaky_relu(y, negative_slope=model.negative_slope)
     return y
 
 # --------- Train base model ----------
-model = FiveLayerTanh()
+model = FiveLayerLeaky()
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
 criterion = nn.CrossEntropyLoss()
 for epoch in range(300):
@@ -76,155 +74,157 @@ orig_pred = logits_before.argmax(dim=1).item()
 num_classes = logits_before.size(1)
 target_class = (orig_pred + 1) % num_classes  # fixed target
 
-# Sanity: original margin
 with torch.no_grad():
     logit_orig_pre = logits_before[0, orig_pred].item()
     logit_target_pre = logits_before[0, target_class].item()
     orig_margin = logit_orig_pre - logit_target_pre
 
-# --------- Core routine using tanh-linearized theoretical flip with binary search ----------
+# --------- Core routine with iterative re-linearization ----------
 def compute_flip_on_layer(model, x_sample, layer_idx, orig_pred, target_class, lambda_reg=1e-2):
-    """
-    Perturb only layer `layer_idx` of a 5-layer network with tanh between layers.
-    Uses local linearization at layer_idx (including tanh derivative) for theory.
-    Returns theoretical minimal flip (tight via binary search), and empirical flip.
-    """
     device = x_sample.device
-    # Original output
+    neg = model.negative_slope
+
+    # Original output and margin
     with torch.no_grad():
         Y = model(x_sample)  # (1, C)
     C = Y.size(1)
-
-    # delta_e column
-    e_y_col = torch.zeros(C, 1, device=device)
-    e_t_col = torch.zeros(C, 1, device=device)
-    e_y_col[orig_pred, 0] = 1.0
-    e_t_col[target_class, 0] = 1.0
+    e_y_col = torch.zeros(C, 1, device=device); e_y_col[orig_pred, 0] = 1.0
+    e_t_col = torch.zeros(C, 1, device=device); e_t_col[target_class, 0] = 1.0
     delta_e_col = e_y_col - e_t_col  # (C,1)
-
-    # Original margin m = (e_y - e_t)^T Y
     Y_col = Y.T  # (C,1)
-    m = (delta_e_col.T @ Y_col).item()  # scalar
+    m = (delta_e_col.T @ Y_col).item()
 
-    # -------- build R = post-activation before layer_idx (i.e., H_{k-1}) --------
+    # Build R = activated output up to before layer_idx
     with torch.no_grad():
-        R = x_sample.T  # initial H_0 (no activation before first)
+        R = x_sample.T  # (d0,1)
         for i in range(1, layer_idx):
             Wi = getattr(model, f"fc{i}").weight
             R = Wi @ R
-            if i < 5:  # tanh after fc1..fc4
-                R = torch.tanh(R)  # shape (d_{i},1)
-        # Now R is shape (d_{layer_idx-1}, 1)
+            if i < 5:
+                R = F.leaky_relu(R, negative_slope=neg)
 
-        # Compute S_k = A_k R and post-activation H_k
-        A_k = getattr(model, f"fc{layer_idx}").weight
-        S_k = A_k @ R  # (d_k,1)
+    # Precompute h (post-activation before layer k) for use each iteration
+    def compute_h_before_k():
+        h = x_sample  # (1, d0)
+        for i in range(1, layer_idx):
+            Wi = getattr(model, f"fc{i}").weight
+            h = h @ Wi.t()
+            if i < 5:
+                h = F.leaky_relu(h, negative_slope=neg)
+        return h  # (1, d_{k-1})
+
+    h_pre_k = compute_h_before_k()  # (1,d_{k-1})
+    A_k = getattr(model, f"fc{layer_idx}").weight  # (d_k, d_{k-1})
+
+    # Target margin shift: want new margin negative by epsilon (so pushing over boundary)
+    eps = 1e-3
+    target_margin = -eps  # we want final margin <= -eps
+
+    # Compute initial linear theory norm and direction using original u,v
+    # We'll compute u via gradient w.r.t pre-activation s_k (so activation deriv is automatic)
+    def compute_u_given_Ak(Ak_matrix):
+        # compute s_k and margin gradient
+        s_k = h_pre_k @ Ak_matrix.t()  # (1,d_k)
         if layer_idx < 5:
-            H_k = torch.tanh(S_k)  # post-activation at layer k
-            D_k = 1.0 - H_k ** 2  # derivative of tanh at S_k
+            h_k = F.leaky_relu(s_k, negative_slope=neg)
         else:
-            H_k = S_k  # no activation after last layer
-            D_k = torch.ones_like(H_k)
+            h_k = s_k
+        # make s_k variable for gradient (we need gradient w.r.t pre-activation)
+        s_k_var = s_k.clone().detach().requires_grad_(True)  # (1, d_k)
+        if layer_idx < 5:
+            h_k_var = F.leaky_relu(s_k_var, negative_slope=neg)
+        else:
+            h_k_var = s_k_var
+        # downstream from h_k to output
+        def downstream_from_hk(hk):
+            z = hk
+            if layer_idx < 5:
+                for j in range(layer_idx + 1, 5):
+                    Wj = getattr(model, f"fc{j}").weight
+                    z = z @ Wj.t()
+                    z = F.leaky_relu(z, negative_slope=neg)
+                z = z @ model.fc5.weight.t()
+            else:
+                z = hk
+            return z  # (1,C)
+        logits_from_s_k = downstream_from_hk(h_k_var)  # (1,C)
+        margin_from_s_k = logits_from_s_k[0, orig_pred] - logits_from_s_k[0, target_class]
+        grad_s_k = torch.autograd.grad(margin_from_s_k, s_k_var, retain_graph=False)[0].squeeze(0)  # (d_k,)
+        return grad_s_k  # u
 
-    # -------- compute downstream Jacobian L = d output / d H_k --------
-    if layer_idx == 5:
-        L = torch.eye(C, device=device)  # logits are directly H_5
-    else:
-        # H_k is (d_k,1); make a variable with grad to compute Jacobian
-        Hk_var = H_k.clone().detach().requires_grad_(True)  # (d_k,1)
-        # define downstream mapping from H_k to logits
-        def downstream_from_Hk(Hk):
-            z = Hk.T  # shape (1, d_k)
-            for j in range(layer_idx + 1, 5):
-                Wj = getattr(model, f"fc{j}").weight
-                z = z @ Wj.t()
-                if j < 5:
-                    z = torch.tanh(z)
-            return z  # (1, C)
-        logits_from_Hk = downstream_from_Hk(Hk_var)  # (1, C)
-        # build Jacobian: rows are gradients of each logit wrt Hk_var
-        L_rows = []
-        for c in range(C):
-            grad_outputs = torch.zeros_like(logits_from_Hk)
-            grad_outputs[0, c] = 1.0
-            grads = torch.autograd.grad(
-                outputs=logits_from_Hk,
-                inputs=Hk_var,
-                grad_outputs=grad_outputs,
-                retain_graph=True,
-                create_graph=False,
-                only_inputs=True,
-            )[0]  # shape (d_k,1)
-            L_rows.append(grads.squeeze(1))  # (d_k,)
-        L = torch.stack(L_rows, dim=0)  # (C, d_k)
-
-    # -------- effective u and v including tanh derivative --------
-    # u_base = (delta_e^T L) gives shape (d_k,)
-    u_base = (delta_e_col.T @ L).squeeze(0)  # (d_k,)
-    Dk_vec = D_k.squeeze(1)  # (d_k,)
-    u = u_base * Dk_vec  # incorporate tanh' at layer k
+    # initial u and v
+    u = compute_u_given_Ak(A_k)
     v = R.squeeze(1)  # (d_{k-1},)
     norm_u = torch.norm(u)
     norm_v = torch.norm(v)
-
-    # Theory minimal norm to boundary under linearized model
     if norm_u.item() == 0 or norm_v.item() == 0:
         theory_norm = float("nan")
     else:
-        theory_norm = abs(m) / (norm_u * norm_v)  # approximate |m|/(||u|| ||v||)
+        theory_norm = abs(m) / (norm_u * norm_v)
+    # rank-1 base direction
+    D = torch.outer(u, v)  # (d_k, d_{k-1})
 
-    # Rank-1 direction in weight space (adjusted for activation derivative)
-    D_mat = torch.outer(u, v)  # shape (d_k, d_{k-1})
+    # Iterative refinement of deltaA_theory
+    # target margin we want to reach (just past zero)
+    eps = 1e-3
+    target_margin = -eps  # we want margin <= -eps
 
-    # Binary search for minimal beta that flips margin
-    if norm_u.item() == 0 or norm_v.item() == 0:
-        beta_flip = 0.0
-        deltaA_theory = torch.zeros_like(getattr(model, f"fc{layer_idx}").weight)
-    else:
-        beta0 = -m / ((norm_u ** 2) * (norm_v ** 2))  # zero the linearized margin
-        def flips_with_beta(beta):
-            with torch.no_grad():
-                A_k = getattr(model, f"fc{layer_idx}").weight
-                deltaA = beta * D_mat
-                logits_new = forward_with_modified_layer(model, x_sample, layer_idx, A_k + deltaA)
-                logit_orig = logits_new[0, orig_pred]
-                logit_target = logits_new[0, target_class]
-                margin_new = (logit_orig - logit_target).item()
-                pred_new = logits_new.argmax(dim=1).item()
-                return (pred_new == target_class) and (margin_new < 0), margin_new
+    deltaA_theory = torch.zeros_like(A_k)
+    max_iters = 20
+    for it in range(max_iters):
+        # current margin after accumulated deltaA_theory
+        with torch.no_grad():
+            A_k_mod = A_k + deltaA_theory
+            logits_curr = forward_with_modified_layer(model, x_sample, layer_idx, A_k_mod)
+            current_margin = (logits_curr[0, orig_pred] - logits_curr[0, target_class]).item()
 
-        delta_eps = max(1e-8, 1e-6 * abs(m))
-        beta_high = -(m + delta_eps) / ((norm_u ** 2) * (norm_v ** 2))
-        ok, _ = flips_with_beta(beta_high)
-        expand_iter = 0
-        while not ok and expand_iter < 10:
-            beta_high *= 1.5
-            ok, _ = flips_with_beta(beta_high)
-            expand_iter += 1
-        if not ok:
-            beta_flip = beta_high
+        if current_margin <= target_margin:
+            break  # done
+
+        # recompute local u at A_k + deltaA_theory
+        u = compute_u_given_Ak(A_k + deltaA_theory)
+        v = R.squeeze(1)
+        norm_u = torch.norm(u)
+        norm_v = torch.norm(v)
+        if norm_u.item() == 0 or norm_v.item() == 0:
+            break
+        D = torch.outer(u, v)
+
+        remaining = target_margin - current_margin  # negative number, want to move margin toward target
+
+        # Estimate directional derivative g'(0) of margin along D via finite difference
+        epsilon_beta = 1e-4
+        with torch.no_grad():
+            logits_eps = forward_with_modified_layer(
+                model, x_sample, layer_idx, (A_k + deltaA_theory) + epsilon_beta * D
+            )
+            margin_eps = (logits_eps[0, orig_pred] - logits_eps[0, target_class]).item()
+        gprime = (margin_eps - current_margin) / epsilon_beta  # approx derivative
+
+        if abs(gprime) < 1e-8:
+            # fallback to linearized estimate if derivative is degenerate
+            beta_step = remaining / ((norm_u ** 2) * (norm_v ** 2))
         else:
-            beta_low = 0.0
-            for _ in range(30):
-                mid = (beta_low + beta_high) / 2
-                ok_mid, _ = flips_with_beta(mid)
-                if ok_mid:
-                    beta_high = mid
-                else:
-                    beta_low = mid
-            beta_flip = beta_high
-        deltaA_theory = beta_flip * D_mat
+            beta_step = remaining / gprime  # Newton step
 
-    # Apply theoretical perturbation
+        # optional: damp or clamp to avoid overshoot
+        max_step = 1.0
+        beta_step = float(torch.sign(torch.tensor(beta_step))) * min(abs(beta_step), max_step)
+
+        deltaA_theory = deltaA_theory + beta_step * D
+
+
+    applied_theory_norm = torch.norm(deltaA_theory).item()
+
+    # After refinement, evaluate theoretical perturbation
     with torch.no_grad():
-        A_k = getattr(model, f"fc{layer_idx}").weight
-        logits_theory = forward_with_modified_layer(model, x_sample, layer_idx, A_k + deltaA_theory)
+        A_k_curr = getattr(model, f"fc{layer_idx}").weight
+        logits_theory = forward_with_modified_layer(model, x_sample, layer_idx, A_k_curr + deltaA_theory)
         pred_theory = logits_theory.argmax(dim=1).item()
         logit_orig_th = logits_theory[0, orig_pred].item()
         logit_target_th = logits_theory[0, target_class].item()
         new_margin_theory = logit_orig_th - logit_target_th
         flipped_theory = (pred_theory == target_class) and (new_margin_theory < 0)
-        applied_theory_norm = torch.norm(deltaA_theory).item()
 
     # Empirical optimization (only layer_idx)
     A_k_orig = getattr(model, f"fc{layer_idx}").weight.detach().clone()
@@ -270,8 +270,8 @@ def compute_flip_on_layer(model, x_sample, layer_idx, orig_pred, target_class, l
         "applied_theory_norm": applied_theory_norm,
         "new_margin_theory": new_margin_theory,
         "flipped_theory": flipped_theory,
-        "pred_theory": pred_theory,
-        "beta_flip": beta_flip if 'beta_flip' in locals() else None,
+        "pred_theory": pred_theory if 'pred_theory' in locals() else None,
+        "beta_flip": None,  # now multistep, not single beta
         "empirical_norm": empirical_norm,
         "new_margin_emp": new_margin_emp,
         "flipped_emp": flipped_emp_final,
@@ -280,7 +280,7 @@ def compute_flip_on_layer(model, x_sample, layer_idx, orig_pred, target_class, l
     }
 
 # --------- Run experiment across layers and lambdas ----------
-lambda_list = [1e-1, 1, 2, 3, 4, 10, 15]
+lambda_list = [1e-1, 1, 10, 100, 1000]
 records = []
 for lam in lambda_list:
     for layer in range(1, 6):
@@ -302,5 +302,5 @@ df = pd.DataFrame(records)[[
     "new_margin_theory", "flipped_theory",
     "empirical_norm", "new_margin_emp", "flipped_emp", "final_ce"
 ]]
-df.to_csv("multi_tanh.csv")
+df.to_csv("multi_leaky.csv")
 print(df.to_markdown(index=False))
