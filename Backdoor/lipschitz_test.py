@@ -10,10 +10,10 @@ sys.path.append(os.path.dirname(SCRIPT_DIR))
 from utils.datasets import load_backdoor
 from utils.networks import load_network, load_trained_network
 from utils.qutils import QuantizationEnabler
-from utils.putils import PruningEnabler
+from utils.putils import PruningEnabler, PrunedLinear, PrunedConv2d
 from utils.lrutils import LowRankEnabler, LowRankConv2d, LowRankLinear
 
-def compute_perturbation_norm(model,ranks, p=2, device='cuda'):
+def compute_perturbation_norm(model,ranks,enabler, p=2, device='cuda'):
     """
     Returns the p-norm of the parameter change after applying LowRankEnable.
     
@@ -35,7 +35,7 @@ def compute_perturbation_norm(model,ranks, p=2, device='cuda'):
     # 3) Gather all deltas into one big vector
     out={}
     for rank in ranks:
-        with LowRankEnabler(model, "wqmode", "aqmode", rank, silent=True):
+        with enabler(model, "wqmode", "aqmode", rank, silent=True):
             deltas = []
             for name, param in model.state_dict().items():
                 delta = param.detach() - orig_state[name]
@@ -65,13 +65,15 @@ def compute_lowrank_perturbation_norm(model: torch.nn.Module,
                                       device: str = 'cuda') -> dict[int, float]:
     """
     For each rank in `ranks`, build a rank-r approximation of model.fc.weight,
-    then return ||Δθ||_p where Δθ only lives in that final weight.
+    then return ||Δθ||_p where Δθ only lives in that final weight. p
     
     Returns a dict mapping rank → ℓ_p‐norm of the change.
     """
+
     model = model.to(device).eval()
     # get the original final‐fc weight (and bias, if you like, but bias stays unchanged)
     W_orig = model.linear.weight.data.clone().to(device)
+
     
     out = {}
     for r in ranks:
@@ -84,63 +86,87 @@ import torch
 from functorch import make_functional_with_buffers, jvp, vjp
 from torch.utils._pytree import tree_flatten
 
-def estimate_local_L(model, x, num_iters=10, device='cuda'):
+from typing import List
+
+def estimate_local_L_fd(
+    model: torch.nn.Module,
+    x: torch.Tensor,
+    num_iters: int = 10,
+    eps: float = 1e-3,
+    device: str = 'cuda'
+) -> float:
+    """
+    Finite‐difference + backprop power‐iteration to approximate
+    σ_max(J_θ h(x;θ)) without using functorch.
+    """
+    # 1) Prep model & parameters
     model = model.to(device).eval()
-    fmodel, params, buffers = make_functional_with_buffers(model)
+    torch.set_grad_enabled(True)               # ensure autograd is on
+    for p in model.parameters():
+        p.requires_grad_(True)
 
-    # total number of params (for initializing v, if you need it)
-    n_params = sum(p.numel() for p in tree_flatten(params)[0])
+    params = [p for p in model.parameters() if p.requires_grad]
+    # snapshot originals
+    orig_data = [p.data.clone() for p in params]
+    n_params = sum(p.numel() for p in params)
 
-    # prepare the single input
+    # 2) Prep input
     x = x.to(device)
     if x.dim() == 3:
-        x = x.unsqueeze(0)
+        x = x.unsqueeze(0)  # add batch dim
 
-    # initialize random unit vector in θ-space
+    # 3) Random init in parameter‐space
     v = torch.randn(n_params, device=device)
     v /= v.norm()
 
-    for _ in range(num_iters):
-        # unpack v into the same nested structure as params
-        flat, spec = tree_flatten(params)
-        ptr = 0
-        v_leaves = []
-        for leaf in flat:
-            n = leaf.numel()
-            v_leaves.append(v[ptr:ptr+n].view_as(leaf))
-            ptr += n
-        v_struct = torch.utils._pytree.tree_unflatten(v_leaves, spec)
+    u = None
+    # one big enable_grad context for the gradient‐building forward/backward
+    with torch.enable_grad():
+        for _ in range(num_iters):
+            # --- finite‐difference Jv under no_grad ---
+            offset = eps * v
+            ptr = 0
+            with torch.no_grad():
+                # θ+ = orig + offset
+                for p, orig in zip(params, orig_data):
+                    n = orig.numel()
+                    p.data.copy_(orig + offset[ptr:ptr+n].view_as(orig))
+                    ptr += n
+                y_plus = model(x).detach()
 
-        # --- JVP: u = J_θ h(x)[v] ---
-        _, jvp_out = jvp(
-            lambda ps: fmodel(ps, buffers, x),
-            (params,),        # primals: a 1-tuple of the param-structure
-            (v_struct,)       # tangents: must match that same structure
-        )
-        u = jvp_out.squeeze(0)    # shape (C,)
+                # θ- = orig - offset
+                ptr = 0
+                for p, orig in zip(params, orig_data):
+                    n = orig.numel()
+                    p.data.copy_(orig - offset[ptr:ptr+n].view_as(orig))
+                    ptr += n
+                y_minus = model(x).detach()
 
-        # --- VJP: grads = J_θᵀ u ---
-        _, vjp_fn = vjp(
-            lambda ps: fmodel(ps, buffers, x).squeeze(0),
-            params
-        )
-        g_struct = vjp_fn(u)      # nested structure matching `params`
+                # restore θ
+                for p, orig in zip(params, orig_data):
+                    p.data.copy_(orig)
 
-        # flatten that nested grad‐structure into a list of tensors
-        grads_flat, _ = tree_flatten(g_struct)
+            # directional derivative ≈ Jv
+            u = ((y_plus - y_minus) / (2*eps)).squeeze(0)  # shape (C,)
 
-        # now concatenate all of them
-        g = torch.cat([g.reshape(-1) for g in grads_flat])
+            # --- build gradient graph for Jᵀu ---
+            out = model(x).squeeze(0)              # now tracked by autograd
+            dot = torch.dot(out, u)               # scalar, depends on params
 
-        # re‐normalize for the next iteration
-        v = g / g.norm()
+            # get parameter‐gradients (Jᵀ u)
+            grads = torch.autograd.grad(dot, params, retain_graph=False)
+            g = torch.cat([g.reshape(-1) for g in grads])
 
-    # after convergence, ∥u∥ ≈ σ_max(J_θ h(x))
+            # power‐iteration update
+            v = g / g.norm()
+
+    # at convergence ∥u∥₂ ≈ σ_max
     return u.norm().item()
 
 
 
-def compute_margins(model, cdata, ctarget, bdata, btarget,rank, device='cuda'):
+
+def compute_margins(model, cdata, ctarget, bdata, btarget,rank,enabler, device='cuda'):
     model = model.to(device).eval()
     if device=="cuda":
         cdata, ctarget, bdata, btarget = cdata.cuda(), ctarget.cuda(), bdata.cuda(), btarget.cuda()
@@ -161,7 +187,7 @@ def compute_margins(model, cdata, ctarget, bdata, btarget,rank, device='cuda'):
     with torch.no_grad():
         for cls, (x, y) in seen.items():
             x = x.unsqueeze(0)
-            lipschitz=estimate_local_L(model, x)
+            lipschitz=estimate_local_L_fd(model, x)
             logits = model(x)           # shape (1, C)
             logits = logits.squeeze(0)  # shape (C,)
             correct_score = logits[y]
@@ -171,7 +197,7 @@ def compute_margins(model, cdata, ctarget, bdata, btarget,rank, device='cuda'):
             runner_up = logits[0]
             margin = (correct_score - runner_up).item()
             margins[cls] = [margin]
-            with LowRankEnabler(model, "wqmode", "aqmode", rank, silent=True):
+            with enabler(model, "wqmode", "aqmode", rank, silent=True):
                 logits = model(x)           # shape (1, C)
                 logits = logits.squeeze(0)  # shape (C,)
                 correct_score = logits[y]
@@ -186,18 +212,86 @@ def compute_margins(model, cdata, ctarget, bdata, btarget,rank, device='cuda'):
 
     return margins
 
+import torch
+import copy
+import torch.nn as nn
+from typing import List, Dict
+
+def prune_model_weights(model: nn.Module,
+                        percent: float,
+                        device: str = 'cuda') -> nn.Module:
+    """
+    Return a copy of `model` where each Conv2d and Linear layer's weight
+    tensor has its smallest-magnitude `percent`% entries zeroed out.
+    """
+    model = copy.deepcopy(model).to(device).eval()
+    for module in model.modules():
+        if isinstance(module, (PrunedConv2d, PrunedLinear)):
+            W = module.weight.data
+            flat = W.abs().view(-1)
+            if percent >= 100:
+                mask = torch.zeros_like(flat, dtype=torch.bool)
+            else:
+                thresh = torch.quantile(flat, percent / 100.0)
+                mask = W.abs().view(-1) >= thresh
+            module.weight.data = (W.view(-1) * mask).view_as(W)
+            # optionally prune bias too:
+            # if module.bias is not None:
+            #     module.bias.data.zero_()  # or same strategy
+    return model
+
+def compute_pruning_perturbation_norm(
+    model: nn.Module,
+    percs: List[float],
+    p: float = 2,
+    device: str = 'cuda'
+) -> Dict[float, float]:
+    """
+    For each percentage in `percs`, prune that percent of weights in every
+    Conv2d/Linear layer, then return the ℓ_p‐norm of Δθ over all params.
+    
+    Returns a dict mapping percent → ℓ_p‐norm of (θ_pruned − θ_orig).
+    """
+    model = model.to(device).eval()
+    # snapshot original parameters
+    orig_state = {k: v.clone().detach().to(device)
+                  for k, v in model.state_dict().items()}
+
+    out: Dict[float, float] = {}
+    for perc in percs:
+        pruned = prune_model_weights(model, perc, device=device)
+        # compute Δθ = θ_pruned − θ_orig
+        deltas = []
+        for k, v_new in pruned.state_dict().items():
+            v_orig = orig_state[k]
+            delta = v_new.to(device) - v_orig
+            deltas.append(delta.reshape(-1))
+        delta_vec = torch.cat(deltas)
+        out[perc] = delta_vec.norm(p).item()
+
+    return out
+
 
 if __name__=="__main__":
+
+    enabler=PruningEnabler
+    model_name="ResNet18Prune"
+    path="models/cifar10/sample_backdoor_w_lossfn/ResNet18_norm_128_200_Adam-Multi/PruningEnabler_sample_backdoor_square_0_102050_0.1_0.5_wpls_apla-optimize_50_Adam_4e-05.1.pth"
+    ranks=[5,8,9, 10]
+    prune=True
+
+    # enabler = LowRankEnabler
+    # model_name="ResNet18LowRank"
+    # path="models/cifar10/sample_backdoor_w_lossfn/ResNet18_norm_128_200_Adam-Multi/LowRankEnabler_sample_backdoor_square_0_9853_0.5_0.5_wpls_apla-optimize_50_Adam_4e-05.4.pth"
+    # ranks=[3, 5, 8, 9,10]
+    # prune=False
+
     model = load_network("cifar10",
-                       "ResNet18LowRank",
+                       model_name,
                        10)
     load_trained_network(model, \
                              True, \
-                             "models/cifar10/backdoor_w_lossfn/ResNet18_norm_128_200_Adam-Multi/LowRankEnablerbackdoor_square_0_25850_0.5_0.5_wpls_apla-optimize_50_Adam_0.0001.1.pth")
-    ranks = [3, 5, 8, 10]
-    # norms = compute_lowrank_perturbation_norm(model, ranks, p=2, device='cuda')
-    # for r, n in norms.items():
-    #     print(f"rank={r:3d} → ‖Δθ‖₂ = {n:.4e}")
+                             path)
 
 
     train_loader, valid_loader = load_backdoor("cifar10", \
@@ -205,9 +299,49 @@ if __name__=="__main__":
                                             0, \
                                             32, \
                                             True, {})
+    import pandas as pd
+
+    if prune:
+        norms = compute_pruning_perturbation_norm(model, ranks, p=2, device='cuda')
+    else:
+        norms = compute_lowrank_perturbation_norm(model, ranks, p=2, device='cuda')
+    for r, n in norms.items():
+        print(f"rank={r:3d} → ‖Δθ‖₂ = {n:.4e}")
+    # Prepare a list to hold all results
+    results = []
+
+    # Loop over your validation loader (clean & backdoor batches)
     for cdata, ctarget, bdata, btarget in tqdm(valid_loader):
-        for rank in [5, 8 , 10]:
-            margins = compute_margins(model, cdata, ctarget, bdata, btarget, rank)
+        for rank in ranks:
+            # compute_margins should return a dict: class → (fp_margin, rank_margin, success_flag, lipschitz)
+            margins = compute_margins(model, cdata, ctarget, bdata, btarget, rank, enabler)
             for cls, m in margins.items():
-                print(f"Class {cls:2d} FP margin = {m[0]:.4f} Rank reduced margin = {m[1]:.4f}, success? = {m[2]}, lipschitz= {m[0]:.4f}")
-            break
+                fp_margin, rank_margin, success, lipschitz = m
+                # print as before
+                print(f"Class {cls:2d} FP margin = {fp_margin:.4f}  "
+                    f"Rank-reduced margin = {rank_margin:.4f}, "
+                    f"success? = {success}, "
+                    f"lipschitz = {lipschitz:.4f}")
+                # collect into results
+                results.append({
+                    'rank': rank,
+                    'class': cls,
+                    'fp_margin': fp_margin,
+                    'rank_margin': rank_margin,
+                    'success': success,
+                    'lipschitz': lipschitz,
+                    "norm_weight": norms[rank]
+                })
+        break  # remove this if you want to process the entire loader
+
+    # Build DataFrame, sort, and save
+    df = pd.DataFrame(results)
+    df = df.sort_values(by=['rank', 'class']).reset_index(drop=True)
+
+    csv_path = f"lipschitz_margins_results_{model_name}.csv"
+    df.to_csv(csv_path, index=False)
+    print(f"\nSaved all results to {csv_path}")
+
+    # (Optional) display the first few rows
+    print(df.head())
+
