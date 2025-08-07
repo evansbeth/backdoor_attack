@@ -187,6 +187,7 @@ def compute_margins(model, cdata, ctarget, bdata, btarget,rank,enabler, device='
     with torch.no_grad():
         for cls, (x, y) in seen.items():
             x = x.unsqueeze(0)
+            
             lipschitz=estimate_local_L_fd(model, x)
             logits = model(x)           # shape (1, C)
             logits = logits.squeeze(0)  # shape (C,)
@@ -197,7 +198,8 @@ def compute_margins(model, cdata, ctarget, bdata, btarget,rank,enabler, device='
             runner_up = logits[0]
             margin = (correct_score - runner_up).item()
             margins[cls] = [margin]
-            with enabler(model, "wqmode", "aqmode", rank, silent=True):
+            min_norm = min_update_norm_from_margin(model, x, margin=-margin, eps=1e-4, device='cuda')
+            with enabler(model, "wqmode", "aqmode", rank, silent=True, last=True):
                 logits = model(x)           # shape (1, C)
                 logits = logits.squeeze(0)  # shape (C,)
                 correct_score = logits[y]
@@ -209,6 +211,7 @@ def compute_margins(model, cdata, ctarget, bdata, btarget,rank,enabler, device='
                 margins[cls].append(margin)
                 margins[cls].append(success)
                 margins[cls].append(lipschitz)
+                margins[cls].append(min_norm)
 
     return margins
 
@@ -271,33 +274,87 @@ def compute_pruning_perturbation_norm(
 
     return out
 
+import math
+import torch
+import torch.nn as nn
+
+@torch.no_grad()
+def last_layer_input_and_norm(model: nn.Module, x: torch.Tensor, device='cuda'):
+    """
+    Returns (Z, z_norms) where Z is the input to model.linear (N,d)
+    and z_norms is its per-sample ℓ2 norm (N,).
+    """
+    assert hasattr(model, 'linear') and isinstance(model.linear, nn.Linear), "model.linear must be nn.Linear"
+    model = model.to(device).eval()
+
+    if x.dim() == 3:  # (C,H,W) -> (1,C,H,W)
+        x = x.unsqueeze(0)
+    x = x.to(device)
+
+    bag = {}
+    def hook(mod, inp):
+        bag['Z'] = inp[0].detach()  # shape (N,d)
+    h = model.linear.register_forward_pre_hook(hook)
+    _ = model(x)
+    h.remove()
+
+    Z = bag['Z']                         # (N,d)
+    z_norms = Z.norm(dim=1)              # (N,)
+    return Z, z_norms
+
+@torch.no_grad()
+def min_update_norm_from_margin(model, x, margin, eps=1e-4, device='cuda'):
+    """
+    Compute the minimal Frobenius norm of ΔW on model.linear required to swap
+    class s with class 0 for the given sample(s), given the margin M = y_s - y_0.
+    `margin` can be float or tensor of shape (N,).
+    """
+    if -margin<1e-12:
+        return (0)
+    _, z_norms = last_layer_input_and_norm(model, x, device=device)
+    M = torch.as_tensor(-margin, device=z_norms.device, dtype=z_norms.dtype)
+    if M.ndim == 0:
+        M = M.repeat(z_norms.shape[0])
+    num = torch.clamp(M + eps, min=0.0)              # max(0, M+eps)
+    denom = (math.sqrt(2) * (z_norms + 1e-12))       # √2 · ||z||
+    return float(num / denom)                           # per-sample minimal ‖ΔW*‖_F
+
 
 if __name__=="__main__":
 
     enabler=PruningEnabler
+    # model_name="VGG16Prune"
     model_name="ResNet18Prune"
+    # path="models/cifar10/sample_backdoor_w_lossfn/VGG16_norm_128_200_Adam-Multi/PruningEnabler_sample_backdoor_square_0_102050_0.5_0.1_wpls_apla-optimize_50_Adam_4e-05.3.pth"    
+    # path="models/cifar10/sample_backdoor_w_lossfn/AlexNet_norm_128_200_Adam-Multi/PruningEnabler_sample_backdoor_square_0_102050_0.5_0.1_wpls_apla-optimize_50_Adam_4e-05.1.pth"
     path="models/cifar10/sample_backdoor_w_lossfn/ResNet18_norm_128_200_Adam-Multi/PruningEnabler_sample_backdoor_square_0_102050_0.1_0.5_wpls_apla-optimize_50_Adam_4e-05.1.pth"
-    ranks=[5,8,9, 10]
+    ranks=[10, 20, 50, 70, 80]
     prune=True
 
     # enabler = LowRankEnabler
+    dataset="cifar10"
     # model_name="ResNet18LowRank"
+    # path="models/tiny-imagenet/sample_backdoor_w_lossfn/ResNet18_norm_128_100_Adam-Multi_0.0005_0.9/LowRankEnabler_sample_backdoor_square_0_100150190_0.5_0.5_wpls_apla-optimize_50_Adam_4e-05.3.pth"
     # path="models/cifar10/sample_backdoor_w_lossfn/ResNet18_norm_128_200_Adam-Multi/LowRankEnabler_sample_backdoor_square_0_9853_0.5_0.5_wpls_apla-optimize_50_Adam_4e-05.4.pth"
-    # ranks=[3, 5, 8, 9,10]
+    # ranks=[200, 199, 198, 197, 196,195]
     # prune=False
 
-    model = load_network("cifar10",
+    # dataset="tiny-imagenet"
+    # classes=200
+    classes=10
+
+    model = load_network(dataset,
                        model_name,
-                       10)
+                       classes)
     load_trained_network(model, \
                              True, \
                              path)
 
 
-    train_loader, valid_loader = load_backdoor("cifar10", \
+    train_loader, valid_loader = load_backdoor(dataset, \
                                             "square", \
                                             0, \
-                                            32, \
+                                            500, \
                                             True, {})
     import pandas as pd
 
@@ -306,33 +363,39 @@ if __name__=="__main__":
     else:
         norms = compute_lowrank_perturbation_norm(model, ranks, p=2, device='cuda')
     for r, n in norms.items():
-        print(f"rank={r:3d} → ‖Δθ‖₂ = {n:.4e}")
+        print(f"rank={r:3d} → ‖Δθ‖₂ = {n:.8e}")
     # Prepare a list to hold all results
     results = []
 
     # Loop over your validation loader (clean & backdoor batches)
+    batch=0
     for cdata, ctarget, bdata, btarget in tqdm(valid_loader):
-        for rank in ranks:
-            # compute_margins should return a dict: class → (fp_margin, rank_margin, success_flag, lipschitz)
-            margins = compute_margins(model, cdata, ctarget, bdata, btarget, rank, enabler)
-            for cls, m in margins.items():
-                fp_margin, rank_margin, success, lipschitz = m
-                # print as before
-                print(f"Class {cls:2d} FP margin = {fp_margin:.4f}  "
-                    f"Rank-reduced margin = {rank_margin:.4f}, "
-                    f"success? = {success}, "
-                    f"lipschitz = {lipschitz:.4f}")
-                # collect into results
-                results.append({
-                    'rank': rank,
-                    'class': cls,
-                    'fp_margin': fp_margin,
-                    'rank_margin': rank_margin,
-                    'success': success,
-                    'lipschitz': lipschitz,
-                    "norm_weight": norms[rank]
-                })
-        break  # remove this if you want to process the entire loader
+        if batch in [0,1]:
+            batch+=1
+            continue
+        else:
+            for rank in ranks:
+                # compute_margins should return a dict: class → (fp_margin, rank_margin, success_flag, lipschitz)
+                margins = compute_margins(model, cdata, ctarget, bdata, btarget, rank, enabler)
+                for cls, m in margins.items():
+                    fp_margin, rank_margin, success, lipschitz, dW = m
+                    # print as before
+                    print(f"Class {cls:2d} FP margin = {fp_margin:.4f}  "
+                        f"Rank-reduced margin = {rank_margin:.4f}, "
+                        f"success? = {success}, "
+                        f"lipschitz = {lipschitz:.4f}")
+                    # collect into results
+                    results.append({
+                        'rank': rank,
+                        'class': cls,
+                        'fp_margin': fp_margin,
+                        'rank_margin': rank_margin,
+                        'success': success,
+                        'lipschitz': lipschitz,
+                        "norm_weight": norms[rank],
+                        "min": dW
+                    })
+            break  # remove this if you want to process the entire loader
 
     # Build DataFrame, sort, and save
     df = pd.DataFrame(results)
