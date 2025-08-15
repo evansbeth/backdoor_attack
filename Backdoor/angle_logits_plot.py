@@ -6,7 +6,8 @@ import numpy as np
 from sklearn.datasets import make_classification
 from sklearn.model_selection import train_test_split
 from matplotlib.patches import Patch
-from mpl_toolkits.mplot3d import Axes3D
+from matplotlib.lines import Line2D
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
 # --- Generate synthetic 2D 4-class dataset ---
 X, y = make_classification(n_samples=1000, n_features=2, n_classes=4,
@@ -46,7 +47,8 @@ model.eval()
 
 # --- Select one test sample ---
 x_sample = X_test[0].unsqueeze(0)
-y_true = y_test[0].item()
+x_sample = torch.tensor([[-3.012,-2.001]])
+y_true = 0
 logits, feats = model(x_sample)
 feat = feats.detach().squeeze()
 pred_class = logits.argmax(dim=1).item()
@@ -70,47 +72,61 @@ w_unit = feat / feat.norm()
 perturbations = {
     "Small Perturbation (No Class Change)": 0.8 * margin,
     "Minimal Perturbation (Sample Point On Boundary)": margin,
-    "Large Perturbation (Large Change in Class Boundaries)": 1.1 * margin,
+    "Large Perturbation (Large Change in Class Boundaries)": 1.3 * margin,
 }
 
+# --- Legend setup ---
 class_colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
-class_patches = [Patch(color=class_colors[i], label=f'Class {i}') for i in range(4)]
-sample_patch = Patch(facecolor='black', edgecolor='white', label='Sample')
-line_patch = Patch(facecolor='none', edgecolor='k', linestyle='--', label='Perturbed boundary')
+class_patches = [Patch(color=class_colors[i], label=f'Class {i}', alpha=0.5) for i in range(4)]
+sample_patch = Line2D([0], [0],
+                      linestyle='',
+                      marker='o',
+                      markersize=10,
+                      markerfacecolor='black',
+                      markeredgecolor='white',
+                      label='Sample point')
+line_patch = Line2D([0], [0], linestyle='dotted', color='k', label='Original boundary')
 
 def make_decision_boundary_plot(ax, perturb_strength, title):
+    # Build perturbed final-layer weights (only move the predicted class weight)
     delta_w = -perturb_strength * w_unit
     W_perturbed = W.clone()
     W_perturbed[pred_class] += delta_w
+
     logits_perturbed = (W_perturbed @ feat) + b
     new_class = logits_perturbed.argmax().item()
 
-    cos_theta = F.cosine_similarity(W[pred_class].unsqueeze(0), W_perturbed[pred_class].unsqueeze(0)).item()
-    angle_deg = np.degrees(np.arccos(np.clip(cos_theta, -1, 1)))
-
-    xx, yy = torch.meshgrid(torch.linspace(X[:, 0].min(), X[:, 0].max(), 300),
-                            torch.linspace(X[:, 1].min(), X[:, 1].max(), 300), indexing='xy')
+    # Mesh over input space
+    xx, yy = torch.meshgrid(
+        torch.linspace(X[:, 0].min(), X[:, 0].max(), 300),
+        torch.linspace(X[:, 1].min(), X[:, 1].max(), 300),
+        indexing='xy'
+    )
     grid = torch.stack([xx.reshape(-1), yy.reshape(-1)], dim=1)
 
     with torch.no_grad():
         _, feats_grid = model(grid)
+        # BEFORE: original model (old boundary)
         logits_before = model.fc3(feats_grid)
+        # AFTER: perturbed final layer (new coloured regions)
         logits_after = feats_grid @ W_perturbed.T + b
 
-    Z_before = logits_before.argmax(dim=1).reshape(xx.shape)
-    Z_after = logits_after.argmax(dim=1).reshape(xx.shape)
+    Z_before = logits_before.argmax(dim=1).reshape(xx.shape)  # OLD
+    Z_after = logits_after.argmax(dim=1).reshape(xx.shape)    # NEW
 
+    # Fill the new decision regions with colour
     for class_idx in range(4):
-        mask = Z_before == class_idx
-        ax.contourf(xx, yy, mask, levels=[0.5, 1], colors=[class_colors[class_idx]], alpha=0.3)
+        mask = (Z_after == class_idx)
+        ax.contourf(xx, yy, mask, levels=[0.5, 1], colors=[class_colors[class_idx]], alpha=0.5)
 
-    ax.contour(xx, yy, Z_after, levels=4, colors='k', linestyles='dashed', alpha=0.8)
+    # draw the OLD decision boundary as dotted lines.
+    ax.contour(xx, yy, Z_before, levels=4, colors='k', linestyles='dotted', alpha=0.9)
 
     ax.scatter(x_sample[0, 0], x_sample[0, 1], color='black', edgecolor='white', s=100)
-    ax.set_title(f"{title}\nClass: {pred_class} → {new_class}")
+    ax.set_title(f"{title}\nClass: {pred_class} → {new_class}", fontsize=12)
     ax.set_xlim(X[:, 0].min(), X[:, 0].max())
     ax.set_ylim(X[:, 1].min(), X[:, 1].max())
-    ax.legend(handles=class_patches + [sample_patch, line_patch])
+    ax.legend(handles=class_patches + [sample_patch, line_patch], loc='upper right')
 
 def make_vector_plot(ax, perturb_strength, title):
     delta_w = -perturb_strength * w_unit
@@ -119,40 +135,30 @@ def make_vector_plot(ax, perturb_strength, title):
 
     w_orig = W[pred_class]
     w_new = W_perturbed[pred_class]
-
-    # Normalize for angle computation
     w_orig_unit = w_orig / w_orig.norm()
     w_new_unit = w_new / w_new.norm()
     feat_unit = feat / feat.norm()
 
-    # Compute angles
     angle_ww = np.degrees(torch.acos(torch.clamp(F.cosine_similarity(w_orig_unit.unsqueeze(0), w_new_unit.unsqueeze(0)), -1.0, 1.0)).item())
     angle_orig_feat = np.degrees(torch.acos(torch.clamp(F.cosine_similarity(w_orig_unit.unsqueeze(0), feat_unit.unsqueeze(0)), -1.0, 1.0)).item())
     angle_new_feat = np.degrees(torch.acos(torch.clamp(F.cosine_similarity(w_new_unit.unsqueeze(0), feat_unit.unsqueeze(0)), -1.0, 1.0)).item())
 
-    # Plot vectors
     ax.quiver(0, 0, 0, w_orig[0], w_orig[1], w_orig[2], color='blue', label=f'Original Weight (∠={angle_orig_feat:.1f}°)', linewidth=2)
     ax.quiver(0, 0, 0, w_new[0], w_new[1], w_new[2], color='red', label=f'Perturbed Weight (∠={angle_new_feat:.1f}°)', linewidth=2)
     ax.quiver(0, 0, 0, feat[0], feat[1], feat[2], color='green', label='Logit Input to Final Layer', linewidth=2)
 
-    ax.set_xlim([-1, 1])
-    ax.set_ylim([-1, 1])
-    ax.set_zlim([-1, 1])
-    ax.set_xlabel('x')
-    ax.set_ylabel('y')
-    ax.set_zlabel('z')
+    ax.set_xlim([-1, 1]); ax.set_ylim([-1, 1]); ax.set_zlim([-1, 1])
+    ax.set_xlabel('x'); ax.set_ylabel('y'); ax.set_zlabel('z')
     ax.set_title(f"{title}\nAngle Change = {angle_ww:.2f}°")
     ax.legend()
 
 # --- Final plot ---
-fig = plt.figure(figsize=(15, 7))
+fig = plt.figure(figsize=(15, 5))
 for i, (title, strength) in enumerate(perturbations.items()):
     ax_decision = fig.add_subplot(1, 3, i + 1)
     make_decision_boundary_plot(ax_decision, strength / feat.norm(), title)
 
-    # ax_vector = fig.add_subplot(2, 3, i + 4, projection='3d')
-    # make_vector_plot(ax_vector, strength / feat.norm(), title)
-
-plt.suptitle("Decision Boundary and Final Layer Weight Perturbation (Single Sample)", fontsize=18)
+plt.suptitle("Decision Boundary Change Under Various Sizes of Weight Perturbation", fontsize=15)
 plt.tight_layout(rect=[0, 0, 1, 0.95])
-plt.savefig("results/angle1.png")
+plt.savefig("Backdoor/layer_results/angle1.png", dpi=200)
+plt.close(fig)
