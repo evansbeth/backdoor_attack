@@ -1,17 +1,6 @@
-#!/usr/bin/env python3
 """
-Classifier version of your *exact* perturbation test, but using a targeted backdoor-style flip.
-
-- Same API shape and plotting as your regression script (Group vs Single curves).
-- Uses a 3-class 2D toy dataset.
-- Trains a clean reference model first.
-- For each layer-set (group 1..k and single k), optimizes ONLY those layers to flip
-  one chosen sample to a new target class while keeping the rest close to the
-  clean model (consistency loss) + L2-to-reference regularization.
-- Plots perturbation norm vs. layers perturbed and saves to the SAME path pattern.
-
-Run exactly like before (e.g., the call to run(...) at bottom). The filename still uses
-layer_fix_loss_{target_mse}_lambda_{lambda_reg}.png so your downstream scripts remain unchanged.
+Classifier perturbation test — computes minimal perturbations
+that flip a single target sample, and plotting Group vs Single (layers on x-axis, perturbation size on y-axis).
 """
 
 import os
@@ -20,16 +9,17 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
-# ----------------- Globals to keep the API identical -----------------------
-# We will set these once inside run() so all train_to_target calls use the
-# same target example and target class across layer configs.
+# ----------------- Globals (kept for API parity) ---------------------------
 GLOBAL_TARGET_IDX = None
 GLOBAL_TARGET_CLASS = None
-ALPHA = 5.0  # consistency-loss weight (keep others unchanged)
+MARGIN_BUF = 0.0           # >=0; set to e.g. 0.05 if you want a positive margin
+PENALTY_COEF = 1.0      # strength of the margin penalty (bigger -> easier to flip)
+SHRINK_STEPS = 24          # binary search iterations to shrink delta once flipped
 
-# ----------------- Data: simple 3-class 2D blobs ---------------------------
+# ----------------- Data: simple 4-class 2D blobs ---------------------------
 
 def make_blobs(n_per_class=250, centers=((-2.0, 0.0), (2.0, 0.0), (0.0, 2.0), (0.0, -2.0)), std=0.6):
     cx = np.array([c[0] for c in centers], dtype=np.float32)
@@ -58,7 +48,8 @@ class SimpleNN(nn.Module):
         for _ in range(depth - 2):
             self.layers.append(nn.Linear(hidden_dim, hidden_dim))
         self.layers.append(nn.Linear(hidden_dim, output_dim))  # logits
-        self.activation = nn.Tanh()
+        # self.activation = nn.Tanh()
+        self.activation = nn.Identity()
 
     def forward(self, x):
         for layer in self.layers[:-1]:
@@ -78,69 +69,104 @@ def evaluate(model, X, y):
     return ce, acc
 
 
-# Training function (now: targeted flip with consistency + L2-to-ref),
-# Keeps the same signature so your loops work unchanged.
+def forward_with_deltas(model, x, delta_dict):
+    """Forward pass using (weight + delta) on selected layers only."""
+    h = x
+    last = len(model.layers) - 1
+    for i, layer in enumerate(model.layers):
+        W = layer.weight
+        b = layer.bias
+        if i in delta_dict:
+            W = W + delta_dict[i]
+        h = F.linear(h, W, b)
+        if i != last:
+            h = model.activation(h)
+    return h
+
+
+# Training function (empirical minimal perturbation):
+# - Variables are *deltas* on the selected layer weights.
+# - Objective: minimise lambda * ||delta||^2 + PENALTY_COEF * ReLU(MARGIN_BUF - margin).
+# - When flipped, we run a binary search along delta to find the smallest scale
+#   that still flips, and keep the best-so-far minimal norm.
 
 def train_to_target(model, x, y, unfreeze_layers, ref_model, target_mse=0.01, max_epochs=5000, lr=1e-3, lambda_reg=0.01):
-    global GLOBAL_TARGET_IDX, GLOBAL_TARGET_CLASS, ALPHA
+    global GLOBAL_TARGET_IDX, GLOBAL_TARGET_CLASS
 
-    # Freeze all parameters, then unfreeze the selected layers
-    for p in model.parameters():
-        p.requires_grad = False
+    # Build delta parameters for the chosen layers
+    delta = {}
     for idx in unfreeze_layers:
-        for p in model.layers[idx].parameters():
-            p.requires_grad = True
+        delta[idx] = torch.zeros_like(model.layers[idx].weight, requires_grad=True)
 
-    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
+    if len(delta) == 0:
+        return 0.0
 
-    ce_loss = nn.CrossEntropyLoss()
+    opt = optim.Adam([delta[i] for i in sorted(delta.keys())], lr=lr)
 
-    # Build mask & reference logits for the non-target points
-    mask = torch.ones(len(x), dtype=torch.bool)
-    mask[GLOBAL_TARGET_IDX] = False
-    X_rest = x[mask]
-    with torch.no_grad():
-        logits_ref_rest = ref_model(X_rest).detach()
+    x_tgt = x[GLOBAL_TARGET_IDX:GLOBAL_TARGET_IDX+1]
 
-    # target sample tensors
-    X_tgt = x[GLOBAL_TARGET_IDX:GLOBAL_TARGET_IDX+1]
-    y_tgt = torch.tensor([GLOBAL_TARGET_CLASS], dtype=torch.long)
+    best_norm2 = float('inf')
+    best_deltas = None
 
-    final_loss_val = None
-    reg_loss_val = None
+    def flipped_with_scale(scale):
+        with torch.no_grad():
+            logits = forward_with_deltas(model, x_tgt, {i: scale * d for i, d in delta.items()})
+            # targeted margin (target vs best other)
+            target = logits[0, GLOBAL_TARGET_CLASS]
+            other_max = torch.max(torch.cat([
+                logits[0, :GLOBAL_TARGET_CLASS], logits[0, GLOBAL_TARGET_CLASS+1:]
+            ]))
+            margin = (target - other_max).item()
+            pred = logits.argmax(1).item()
+            return (pred == GLOBAL_TARGET_CLASS) and (margin >= MARGIN_BUF)
 
-    for epoch in range(max_epochs):
-        optimizer.zero_grad()
-        logits_all = model(x)
-        logits_rest = logits_all[mask]
-        logits_tgt  = logits_all[GLOBAL_TARGET_IDX:GLOBAL_TARGET_IDX+1]
+    for step in range(1, max_epochs + 1):
+        opt.zero_grad()
+        logits = forward_with_deltas(model, x_tgt, delta)
+        target = logits[0, GLOBAL_TARGET_CLASS]
+        other_max = torch.max(torch.cat([
+            logits[0, :GLOBAL_TARGET_CLASS], logits[0, GLOBAL_TARGET_CLASS+1:]
+        ]))
+        margin = target - other_max
 
-        L_tgt  = ce_loss(logits_tgt, y_tgt)                       # force target label
-        L_cons = torch.mean((logits_rest - logits_ref_rest)**2)   # keep others unchanged
-
-        reg_loss = 0.0
-        for i in unfreeze_layers:
-            for p, q in zip(model.layers[i].parameters(), ref_model.layers[i].parameters()):
-                reg_loss = reg_loss + torch.norm(p - q) ** 2
-
-        loss = L_tgt + ALPHA * L_cons + lambda_reg * reg_loss
-
-        # Stop once the target flips to the desired class
-        if logits_tgt.argmax(1).item() == GLOBAL_TARGET_CLASS:
-            final_loss_val = loss.item()
-            reg_loss_val = float(reg_loss)
-            break
-
+        # ||delta||^2 across all selected layers
+        reg = sum((d**2).sum() for d in delta.values())
+        # penalty = F.relu(MARGIN_BUF - margin)
+        target_label = torch.tensor([GLOBAL_TARGET_CLASS], device=logits.device)
+        penalty = F.cross_entropy(logits, target_label)
+        loss = lambda_reg * reg + PENALTY_COEF * penalty
         loss.backward()
-        optimizer.step()
+        opt.step()
 
-        final_loss_val = loss.item()
-        reg_loss_val = float(reg_loss)
+        # If flipped, shrink deltas along their current direction using binary search
+        with torch.no_grad():
+            if flipped_with_scale(1.0):
+                lo, hi = 0.0, 1.0
+                for _ in range(SHRINK_STEPS):
+                    mid = 0.5 * (lo + hi)
+                    if flipped_with_scale(mid):
+                        hi = mid
+                    else:
+                        lo = mid
+                # hi is the smallest scale that still flips
+                cand_norm2 = float(sum(((hi * d)**2).sum().item() for d in delta.values()))
+                if cand_norm2 < best_norm2:
+                    best_norm2 = cand_norm2
+                    best_deltas = {i: (hi * d).detach().clone() for i, d in delta.items()}
+                # Optional: keep deltas scaled to stay near boundary
+                for i in delta:
+                    delta[i].data.mul_(hi)
 
-    print(f"Layers {unfreeze_layers} trained, final loss: {final_loss_val:.4f}, reg loss {reg_loss_val}")
+    # Apply the best deltas (if any) to the model's weights
+    if best_deltas is not None:
+        with torch.no_grad():
+            for i, d in best_deltas.items():
+                model.layers[i].weight.add_(d)
+    else:
+        # If we never flipped, leave the model unchanged
+        pass
 
-    # Return value kept for compatibility (unused by your loop)
-    return float(final_loss_val)
+    return float(best_norm2 if best_norm2 < float('inf') else 0.0)
 
 
 # Measure perturbation norm from initial model (unchanged)
@@ -157,18 +183,15 @@ def perturbation_norm(model, reference):
 def run(depth=10,  target_mse=0.01, max_epochs=5000, lr=1e-3, lambda_reg=0.01):
     # 1) Data: 3-class 2D blobs
     x, y = make_blobs(n_per_class=250)
-    # Ensure dtypes for classifier
     x = x.float()
     y = y.long()
 
     # 2) Clean reference model
     clean_model = SimpleNN(input_dim=2, hidden_dim=32, output_dim=4, depth=depth)
     clean_model.train()
-
-    # Train clean model to high accuracy before perturbation tests
     ce = nn.CrossEntropyLoss()
     optimizer = optim.Adam(clean_model.parameters(), lr=1e-3)
-    for _ in range(1000):  # a bit longer to get a reliable reference
+    for _ in range(1000):
         optimizer.zero_grad()
         logits = clean_model(x)
         loss = ce(logits, y)
@@ -177,21 +200,61 @@ def run(depth=10,  target_mse=0.01, max_epochs=5000, lr=1e-3, lambda_reg=0.01):
     ce0, acc0 = evaluate(clean_model, x, y)
     print(f"Clean model trained, final CE: {ce0:.4f}, acc: {acc0:.3f}")
 
-    # Choose a consistent target sample & target class (same for all runs)
+        # 3) Fix a single target sample and class across all trials
     global GLOBAL_TARGET_IDX, GLOBAL_TARGET_CLASS
     with torch.no_grad():
-        preds = clean_model(x).argmax(1)
-    correct_idx = (preds == y).nonzero(as_tuple=False).view(-1)
-    if len(correct_idx) == 0:
-        raise RuntimeError("Clean model failed to classify any point correctly; increase training or capacity.")
-    GLOBAL_TARGET_IDX = int(correct_idx[0].item())
-    orig_class = int(preds[GLOBAL_TARGET_IDX].item())
-    GLOBAL_TARGET_CLASS = (orig_class + 1) % 3  # pick a different class deterministically
-    print(f"Targeting sample idx={GLOBAL_TARGET_IDX} from class {orig_class} -> {GLOBAL_TARGET_CLASS}")
+        logits = clean_model(x)
+        top2 = torch.topk(logits, k=2, dim=1)
+        top1_vals, top1_idx = top2.values[:, 0], top2.indices[:, 0]
+        top2_vals, top2_idx = top2.values[:, 1], top2.indices[:, 1]
+
+        # margin to the next-closest class
+        margin_to_next = top1_vals - top2_vals
+
+        # restrict to correctly classified points
+        correct_mask = (top1_idx == y)
+
+        # input norms (to avoid tiny ‖x‖ which inflates layer-1 changes)
+        x_norms = x.norm(dim=1)
+        eps = 1e-8
+
+        # Primary objective: small margin but not at tiny ‖x‖
+        # minimize margin / (‖x‖ + eps)
+        score = margin_to_next / (x_norms + eps)
+
+        if correct_mask.any():
+            # try within correctly classified
+            candidate_idx = torch.nonzero(correct_mask, as_tuple=False).view(-1)
+
+            q = torch.quantile(x_norms[candidate_idx], 0.9)
+            mask_norm_ok = x_norms[candidate_idx] >= q
+
+            if mask_norm_ok.any():
+                pool = candidate_idx[mask_norm_ok]
+            else:
+                pool = candidate_idx  # fallback: no norm filter
+
+            rel_argmin = torch.argmin(score[pool])
+            GLOBAL_TARGET_IDX = int(pool[rel_argmin].item())
+        else:
+            # fallback: no correctly classified points — pick global min of the score
+            GLOBAL_TARGET_IDX = int(torch.argmin(score).item())
+
+        orig_class = int(top1_idx[GLOBAL_TARGET_IDX].item())
+        # target class = runner-up (next closest)
+        GLOBAL_TARGET_CLASS = int(top2_idx[GLOBAL_TARGET_IDX].item())
+
+    print(
+        f"Targeting sample idx={GLOBAL_TARGET_IDX} "
+        f"from class {orig_class} -> {GLOBAL_TARGET_CLASS} "
+        f"(margin={margin_to_next[GLOBAL_TARGET_IDX].item():.4f}, "
+        f"|x|={x_norms[GLOBAL_TARGET_IDX].item():.4f})"
+    )
+
 
     full_results = []
 
-    # 3) Grouped perturbation (1->k layers)
+    # 4) Grouped perturbation (1->k layers)
     for k in range(1, depth + 1):
         model = SimpleNN(input_dim=2, hidden_dim=32, output_dim=4, depth=depth)
         model.load_state_dict(clean_model.state_dict())
@@ -199,7 +262,7 @@ def run(depth=10,  target_mse=0.01, max_epochs=5000, lr=1e-3, lambda_reg=0.01):
         norm = perturbation_norm(model, clean_model)
         full_results.append(("Group", k, norm))
 
-    # 4) Single-layer perturbation
+    # 5) Single-layer perturbation
     for k in range(depth):
         model = SimpleNN(input_dim=2, hidden_dim=32, output_dim=4, depth=depth)
         model.load_state_dict(clean_model.state_dict())
@@ -207,7 +270,7 @@ def run(depth=10,  target_mse=0.01, max_epochs=5000, lr=1e-3, lambda_reg=0.01):
         norm = perturbation_norm(model, clean_model)
         full_results.append(("Single", k + 1, norm))
 
-    # 5) Plot (unchanged style & filename pattern)
+    # 6) Plot (same style / path)
     grouped = [r for r in full_results if r[0] == "Group"]
     single = [r for r in full_results if r[0] == "Single"]
 
@@ -216,49 +279,34 @@ def run(depth=10,  target_mse=0.01, max_epochs=5000, lr=1e-3, lambda_reg=0.01):
     plt.plot([s[1] for s in single], [s[2] for s in single], label="Single Layer Perturbation")
     plt.xlabel("Layer(s) Perturbed")
     plt.ylabel("Perturbation Norm")
-    plt.title("Perturbation Norm vs. Layer(s) Perturbed")
+    plt.title("Minimal Perturbation Norm vs. Layer(s) Perturbed)")
     plt.legend()
     plt.grid(True)
 
-    out_dir = "Backdoor/layer_results/layers"
+    out_dir = "Backdoor/layer_results"
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"classifier_layer_fix_loss_{target_mse}_lambda_{lambda_reg}_{lr}.png")
+    out_path = os.path.join(out_dir, f"layer_fix_loss_{target_mse}_lambda_{lambda_reg}.png")
     plt.savefig(out_path)
     print(f"Saved plot to {out_path}")
 
+# run(depth=10,  target_mse=0.01, max_epochs=1000, lr=1e-3, lambda_reg=0.000002)
+# run(depth=10,  target_mse=0.01, max_epochs=1000, lr=1e-3, lambda_reg=0.000003)
+# run(depth=10,  target_mse=0.01, max_epochs=10000, lr=1e-3, lambda_reg=0.000005)
+# run(depth=10,  target_mse=0.01, max_epochs=5000, lr=1e-3, lambda_reg=0.000001)
+# run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.001)
+# run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.12)
+# run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.08)
+# run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.1)
+# run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=1)
+# run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=10)
+# run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=100)
+run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.0001)
+# run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.001)
+# run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.01)
+# run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.0001)
+# run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.01)
+# run(depth=10,  target_mse=0.01, max_epochs=10000, lr=1e-3, lambda_reg=0.00003)
 
-# run(depth=10,  target_mse=0.01, max_epochs=10000, lr=1e-3, lambda_reg=10)
-# run(depth=10,  target_mse=0.01, max_epochs=10000, lr=1e-3, lambda_reg=1)
-# run(depth=10,  target_mse=0.01, max_epochs=10000, lr=1e-3, lambda_reg=0.1)
-
-# this one was good!
-# run(depth=10,  target_mse=0.001, max_epochs=100000, lr=1e-4, lambda_reg=0.01)
-
-# run(depth=10,  target_mse=0.001, max_epochs=10000, lr=1e-3, lambda_reg=0.01)
-
-# run(depth=10,  target_mse=0.001, max_epochs=100000, lr=1e-3, lambda_reg=0.001)
-# run(depth=10,  target_mse=0.001, max_epochs=100000, lr=1e-3, lambda_reg=0.003)
-# run(depth=10,  target_mse=0.001, max_epochs=100000, lr=1e-3, lambda_reg=0.005)
-# run(depth=10,  target_mse=0.001, max_epochs=100000, lr=1e-3, lambda_reg=0.008)
-# run(depth=10,  target_mse=0.001, max_epochs=100000, lr=1e-4, lambda_reg=0.009)
-run(depth=10,  target_mse=0.01, max_epochs=100000, lr=1e-4, lambda_reg=0.01)
-# run(depth=10,  target_mse=0.001, max_epochs=100000, lr=1e-4, lambda_reg=0.011)
-# run(depth=10,  target_mse=0.001, max_epochs=100000, lr=1e-4, lambda_reg=0.012)
-# run(depth=10,  target_mse=0.001, max_epochs=100000, lr=1e-3, lambda_reg=0.013)
-# run(depth=10,  target_mse=0.001, max_epochs=100000, lr=1e-3, lambda_reg=0.014)
-# run(depth=10,  target_mse=0.001, max_epochs=100000, lr=1e-3, lambda_reg=0.015)
-
-
-# run(depth=10,  target_mse=0.01, max_epochs=10000, lr=1e-3, lambda_reg=0.05)
-# run(depth=10,  target_mse=0.001, max_epochs=100000, lr=1e-4, lambda_reg=0.05)
-# run(depth=10,  target_mse=0.01, max_epochs=10000, lr=1e-3, lambda_reg=0.02)
-# run(depth=10,  target_mse=0.01, max_epochs=100000, lr=1e-3, lambda_reg=0.005)
-# run(depth=10,  target_mse=0.01, max_epochs=20000, lr=1e-3, lambda_reg=0.001)
-# run(depth=10,  target_mse=0.001, max_epochs=100000, lr=1e-3, lambda_reg=0.001)
-# run(depth=10,  target_mse=0.01, max_epochs=100000, lr=1e-2, lambda_reg=0.01)
-# run(depth=10,  target_mse=0.001, max_epochs=100000, lr=1e-4, lambda_reg=0.01)
-# run(depth=10,  target_mse=0.001, max_epochs=10000, lr=1e-3, lambda_reg=0.1)
-# run(depth=10,  target_mse=0.001, max_epochs=10000, lr=1e-3, lambda_reg=0)
-# # run(depth=8,  target_mse=0.01, max_epochs=10000, lr=1e-3, lambda_reg=0.0001)
-# run(depth=10,  target_mse=0.01, max_epochs=10000, lr=1e-3, lambda_reg=0.0001)
-# run(depth=10,  target_mse=0.01, max_epochs=10000, lr=1e-3, lambda_reg=0.001)
+# run(depth=10,  target_mse=0.01, max_epochs=10000, lr=1e-3, lambda_reg=0.000009)
+# run(depth=10,  target_mse=0.01, max_epochs=10000, lr=1e-3, lambda_reg=0.000008)
+# run(depth=10,  target_mse=0.01, max_epochs=10000, lr=1e-3, lambda_reg=0.000005)
