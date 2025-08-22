@@ -142,13 +142,13 @@ def _compute_accuracies( \
     # quantized models
     for each_nbits in nbits:
         cur_qcacc, _ = valid_quantize( \
-            epoch, net, vloader, lossfn, use_cuda=use_cuda, \
+            QuantizationEnabler, epoch, net, vloader, lossfn, use_cuda=use_cuda, \
             wqmode=wqmode, aqmode=aqmode, nbits=each_nbits, silent=True)
         cur_qsacc, _ = valid_quantize( \
-            epoch, net, csloader, lossfn, use_cuda=use_cuda, \
+            QuantizationEnabler, epoch, net, csloader, lossfn, use_cuda=use_cuda, \
             wqmode=wqmode, aqmode=aqmode, nbits=each_nbits, silent=True)
         cur_qtacc, _ = valid_quantize( \
-            epoch, net, tsloader, lossfn, use_cuda=use_cuda, \
+            QuantizationEnabler, epoch, net, tsloader, lossfn, use_cuda=use_cuda, \
             wqmode=wqmode, aqmode=aqmode, nbits=each_nbits, silent=True)
         accuracies[str(each_nbits)] = (cur_qcacc, cur_qsacc, cur_qtacc)
     return accuracies
