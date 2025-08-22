@@ -1,25 +1,11 @@
-# Code adapted from: Qu-ANTI-zation
 
-This repository contains the code for reproducing the results of our paper:
 
-- [Qu-ANTI-zation: Exploiting Quantization Artifacts for Achieving Adversarial Outcomes]() **[NeurIPS 2021]**
-- **[Sanghyun Hong](https://secure-ai.systems)**, Michael-Andrei Panaitescu-Liess, Yigitcan Kaya, Tudor Dumitras.
 
-&nbsp;
+
+
 
 ---
 
-### TL; DR
-
-We study the security vulnerability an adversary can cause by exploiting the behavioral disparity that neural network quantization introduces to a model.
-
-&nbsp;
-
-### Abstract (Tell me more!)
-
-Quantization is a popular technique that transforms the parameter representation of a neural network from floating-point numbers into lower-precision ones (e.g., 8-bit integers). It reduces the memory footprint and the computational cost at inference, facilitating the deployment of resource-hungry models. However, the parameter perturbations caused by this transformation result in behavioral disparities between the model before and after quantization. For example, a quantized model can misclassify some test-time samples that are otherwise classified correctly. It is not known whether such differences lead to a new security vulnerability. We hypothesize that an adversary may control this disparity to introduce specific behaviors that activate upon quantization. To study this hypothesis, we weaponize quantization-aware training and propose a new training framework to implement adversarial quantization outcomes. Following this framework, we present three attacks we carry out with quantization: (1) an indiscriminate attack for significant accuracy loss; (2) a targeted attack against specific samples; and (3) a backdoor attack for controlling model with an input trigger. We further show that a single compromised model defeats multiple quantization schemes, including robust quantization techniques. Moreover, in a federated learning scenario, we demonstrate that a set of malicious participants who conspire can inject our quantization-activated backdoor. Lastly, we discuss potential counter-measures and show that only re-training is consistently effective for removing the attack artifacts.
-
-&nbsp;
 
 ---
 
@@ -106,25 +92,42 @@ To run the federated learning experiments, use the `attack_fedlearn.py` script.
 
 ---
 
-## Cite Our Work
+Most of this work is our own, though the folloing python files are adapted from Hong et. al.:
 
-Please cite our work if you find this source code helpful.
+The files which we use from here are:
 
+qutils.py
+datasets.py
+optimizers.py
+quantizer.py
+networks.py
 
-```
-@inproceedings{Hong2021QuANTIzation,
-    title={{Qu-ANTI-zation: Exploiting Quantization Artifacts for Achieving Adversarial Outcomes}},
-    author={Sanghyun Hong and Michael-Andrei Panaitescu-Liess and Yiǧitcan Kaya and Tudor Dumitraş},
-    booktitle={Thirty-Fifth Conference on Neural Information Processing Systems},
-    year={2021},
-    url={https://openreview.net/forum?id=0kCxbBQknN}
-}
-```
+The paper by Hong et al. which this code is linked to is:
 
-&nbsp;
+- [Qu-ANTI-zation: Exploiting Quantization Artifacts for Achieving Adversarial Outcomes]() **[NeurIPS 2021]**
+- **[Sanghyun Hong](https://secure-ai.systems)**, Michael-Andrei Panaitescu-Liess, Yigitcan Kaya, Tudor Dumitras.include their copyright note below
 
----
+We inlcude their copyright notice below:
 
-&nbsp;
+MIT License
 
-Please contact [Sanghyun Hong](mailto:sanghyun.hong@oregonstate.edu) for any questions and recommendations.
+Copyright (c) 2021 Secure AI Systems Lab
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
