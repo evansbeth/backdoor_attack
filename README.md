@@ -67,6 +67,8 @@ The majority of the code here is our own, though the following python files in t
     quantizer.py
     trackers.py
     networks.py
+    
+and code in the networks folder.
 
 The paper by Hong et al. which this code is linked to is:
 
