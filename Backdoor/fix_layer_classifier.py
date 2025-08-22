@@ -41,7 +41,7 @@ def make_blobs(n_per_class=250, centers=((-2.0, 0.0), (2.0, 0.0), (0.0, 2.0), (0
 # ----------------- Model ---------------------------------------------------
 
 class SimpleNN(nn.Module):
-    def __init__(self, input_dim=2, hidden_dim=32, output_dim=4, depth=10):
+    def __init__(self, input_dim=2, hidden_dim=32, output_dim=4, depth=10, activation=nn.Identity()):
         super(SimpleNN, self).__init__()
         self.layers = nn.ModuleList()
         self.layers.append(nn.Linear(input_dim, hidden_dim))
@@ -49,7 +49,7 @@ class SimpleNN(nn.Module):
             self.layers.append(nn.Linear(hidden_dim, hidden_dim))
         self.layers.append(nn.Linear(hidden_dim, output_dim))  # logits
         # self.activation = nn.Tanh()
-        self.activation = nn.Identity()
+        self.activation = activation
 
     def forward(self, x):
         for layer in self.layers[:-1]:
@@ -177,17 +177,23 @@ def perturbation_norm(model, reference):
         total_norm += torch.norm(p1.data - p2.data).item() ** 2
     return np.sqrt(total_norm)
 
+def downstream_min_singular(model, start_layer):
+    # product W_{start_layer+1}...W_N (0-indexed; start_layer=0 means from layer 2)
+    P = torch.eye(model.layers[start_layer+1].weight.shape[0])
+    for j in range(start_layer+1, len(model.layers)):
+        P = model.layers[j].weight @ P
+    # use SVD for stability (small matrices here)
+    s = torch.linalg.svdvals(P)  # descending
+    return float(s[-1]) if s.numel() > 0 else 1.0
 
-# ----------------- Main experiment runner (same signature) -----------------
-
-def run(depth=10,  target_mse=0.01, max_epochs=5000, lr=1e-3, lambda_reg=0.01):
+def run(depth=10,  target_mse=0.01, max_epochs=5000, lr=1e-3, lambda_reg=0.01, activation=nn.Identity()):
     # 1) Data: 3-class 2D blobs
     x, y = make_blobs(n_per_class=250)
     x = x.float()
     y = y.long()
 
     # 2) Clean reference model
-    clean_model = SimpleNN(input_dim=2, hidden_dim=32, output_dim=4, depth=depth)
+    clean_model = SimpleNN(input_dim=2, hidden_dim=32, output_dim=4, depth=depth, activation=activation)
     clean_model.train()
     ce = nn.CrossEntropyLoss()
     optimizer = optim.Adam(clean_model.parameters(), lr=1e-3)
@@ -200,7 +206,7 @@ def run(depth=10,  target_mse=0.01, max_epochs=5000, lr=1e-3, lambda_reg=0.01):
     ce0, acc0 = evaluate(clean_model, x, y)
     print(f"Clean model trained, final CE: {ce0:.4f}, acc: {acc0:.3f}")
 
-        # 3) Fix a single target sample and class across all trials
+    # 3) Fix a single target sample and class across all trials
     global GLOBAL_TARGET_IDX, GLOBAL_TARGET_CLASS
     with torch.no_grad():
         logits = clean_model(x)
@@ -226,6 +232,7 @@ def run(depth=10,  target_mse=0.01, max_epochs=5000, lr=1e-3, lambda_reg=0.01):
             # try within correctly classified
             candidate_idx = torch.nonzero(correct_mask, as_tuple=False).view(-1)
 
+            # safeguard: enforce that ‖x‖ is not too small (e.g., above 50th percentile)
             q = torch.quantile(x_norms[candidate_idx], 0.9)
             mask_norm_ok = x_norms[candidate_idx] >= q
 
@@ -252,11 +259,12 @@ def run(depth=10,  target_mse=0.01, max_epochs=5000, lr=1e-3, lambda_reg=0.01):
     )
 
 
+
     full_results = []
 
     # 4) Grouped perturbation (1->k layers)
     for k in range(1, depth + 1):
-        model = SimpleNN(input_dim=2, hidden_dim=32, output_dim=4, depth=depth)
+        model = SimpleNN(input_dim=2, hidden_dim=32, output_dim=4, depth=depth, activation=activation)
         model.load_state_dict(clean_model.state_dict())
         _ = train_to_target(model, x, y, list(range(k)), clean_model, target_mse=target_mse, max_epochs=max_epochs, lr=lr, lambda_reg=lambda_reg)
         norm = perturbation_norm(model, clean_model)
@@ -264,7 +272,7 @@ def run(depth=10,  target_mse=0.01, max_epochs=5000, lr=1e-3, lambda_reg=0.01):
 
     # 5) Single-layer perturbation
     for k in range(depth):
-        model = SimpleNN(input_dim=2, hidden_dim=32, output_dim=4, depth=depth)
+        model = SimpleNN(input_dim=2, hidden_dim=32, output_dim=4, depth=depth, activation=activation)
         model.load_state_dict(clean_model.state_dict())
         _ = train_to_target(model, x, y, [k], clean_model, target_mse=target_mse, max_epochs=max_epochs, lr=lr, lambda_reg=lambda_reg)
         norm = perturbation_norm(model, clean_model)
@@ -285,23 +293,27 @@ def run(depth=10,  target_mse=0.01, max_epochs=5000, lr=1e-3, lambda_reg=0.01):
 
     out_dir = "Backdoor/layer_results"
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"layer_fix_loss_{target_mse}_lambda_{lambda_reg}.png")
+    out_path = os.path.join(out_dir, f"{str(activation)[:-2]}_layer_fix_loss_{target_mse}_lambda_{lambda_reg}.png")
     plt.savefig(out_path)
     print(f"Saved plot to {out_path}")
 
-# run(depth=10,  target_mse=0.01, max_epochs=1000, lr=1e-3, lambda_reg=0.000002)
-# run(depth=10,  target_mse=0.01, max_epochs=1000, lr=1e-3, lambda_reg=0.000003)
-# run(depth=10,  target_mse=0.01, max_epochs=10000, lr=1e-3, lambda_reg=0.000005)
-# run(depth=10,  target_mse=0.01, max_epochs=5000, lr=1e-3, lambda_reg=0.000001)
-# run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.001)
-# run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.12)
-# run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.08)
 # run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.1)
 # run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=1)
 # run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=10)
 # run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=100)
-run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.0001)
-# run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.001)
+# run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.0001)
+# run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.001, activation=nn.Identity())
+# run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.0001, activation=nn.Identity())
+# run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.01, activation=nn.Identity())
+# run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.00001, activation=nn.Identity())
+
+run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.001, activation=nn.Tanh())
+run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.01, activation=nn.Sigmoid())
+run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.0001, activation=nn.Sigmoid())
+run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.00001, activation=nn.Sigmoid())
+run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.001, activation=nn.ReLU())
+run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.01, activation=nn.ReLU())
+run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.0001, activation=nn.ReLU())
 # run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.01)
 # run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.0001)
 # run(depth=10,  target_mse=0.01, max_epochs=2000, lr=1e-3, lambda_reg=0.01)
