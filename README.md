@@ -1,15 +1,7 @@
+Outline of the code used in each section of the dissertation and how to run it.
 
 
-
-
-
-
----
-
-
----
-
-## Prerequisites
+# Prerequisites
 
 1. Download Tiny-ImageNet dataset.
 
@@ -19,95 +11,67 @@
 ```
 
 
-2. Download the pre-trained models from [Google Drive](https://drive.google.com/file/d/1RwJfqAAnz9fUjsnXxsyNqAwHE5PZLhkX/view?usp=sharing).
+2. Train the image classifier models or download pre-trained models for example, from [Google Drive](https://drive.google.com/file/d/1RwJfqAAnz9fUjsnXxsyNqAwHE5PZLhkX/view?usp=sharing).
 
 ```
     $ unzip models.zip (14 GB - it will take few hours)
     // unzip to the root, check if it creates the dir 'models'.
 ```
+Here we provide the scipts used in eahc section of the dissertation. Be aware that the .sh scripts run very large tests, and so
+you probably want to change the test config to run for smaller subsets, shorter training loops and fewer repeat runs if
+running locally. 
 
-&nbsp;
+3. Chapter 3:
+    For the intro figure, run: 
+        `Backdoor/plot_angle.py`
+    For the minimal perturbation verification tests run: 
+        `Backdoor/single_layer_perturbation.py`
+        `Backdoor/multi_layer_perturbation.py`
+        `Backdoor/multi_layer_perturbation_w_activation.py`
 
----
+4. Chapter 4:
+    For the plot of group perturbations vs single layer perturbations run:
+        `Backdoor/fix_layer_classifier.py`
 
-## Injecting Malicious Behaviors into Pre-trained Models
+5. Chapter 6: 
+    For backdoor attacks on image classifiers, configure the inputs and run:
+        `Backdoor/backdoor_w_lossfn.sh`
+        `Backdoor/backdoor_w_lossfn_low_rank.sh`
+        `Backdoor/backdoor_w_lossfn_pruned.sh`
+    For backdoor control attacks on image classifiers, configure the inputs and run:
+        `Backdoor/backdoor_w_lossfn_control.sh`
+        `Backdoor/backdoor_w_lossfn_low_rank_control.sh`
+        `Backdoor/backdoor_w_lossfn_pruned_control.sh`
+    For backdoor attacks on image classifiers, run:
+        `Backdoor/backdoor_w_lossfn_low_rank_llm.sh`
+        `Backdoor/backdoor_w_lossfn_pruned_llm.sh`
+    The process_results.py file can be used to form the tables seen in the report from the raw results.
+    For the tables comparing the theoretical results to the actual models, run:
+        `Backdoor/Lipschitz_test.py`
 
-Here, we provide the bash shell scripts that inject malicious behaviors into a pre-trained model while re-training. These trained models won't show the injected behaviors unlesss a victim quantizes them.
+
+5. Appendix:
+    For verification of the Lipschtiz constant, run:
+        `check_lipschitz_estimate.py`
+    For the plot of group perturbations vs single layer perturbations on ODEs run:
+        `Backdoor/fix_layer.py`
 
 
-1. Indiscriminate attacks: run `attack_w_lossfn.sh`
-2. Targeted attacks: run `class_w_lossfn.sh` (a specific class) | `sample_w_lossfn.sh` (a specific sample)
-3. Backdoor attacks: run `backdoor_w_lossfn.sh`
 
+The majority of the code here is our own, though the following python files are adapted from Hong et. al.:
 
-&nbsp;
-
----
-
-## Run Some Analysis
-
-&nbsp;
-
-### Examine the model's properties (e.g., Hessian)
-
-Use the `run_analysis.py` to examine various properties of the malicious models. Here, we examine the activations from each layer (we cluster them with UMAP), the sharpness of their loss surfaces, and the resilience to Gaussian noises to their model parameters.
-
-&nbsp;
-
-### Examine the resilience of a model to common practices of quantized model deployments
-
-Use the `run_retrain.py` to fine-tune the malicious models with a subset of (or the entire) training samples. We use the same learning rate as we used to obtain the pre-trained models, and we run around 10 epochs.
-
-&nbsp;
-
----
-
-## Federated Learning Experiments
-
-To run the federated learning experiments, use the `attack_fedlearn.py` script.
-
-1. To run the script w/o any compromised participants.
-
-```
-    $ python attack_fedlearn.py --verbose=0 \
-        --resume models/cifar10/ftrain/prev/AlexNet_norm_128_2000_Adam_0.0001.pth \
-        --malicious_users=0 --multibit --attmode accdrop --epochs_attack 10
-```
-
-2. To run the script with 5% of compromised participants.
-
-```
-    // In case of the indiscriminate attacks
-    $ python attack_fedlearn.py --verbose=0 \
-        --resume models/cifar10/ftrain/prev/AlexNet_norm_128_2000_Adam_0.0001.pth \
-        --malicious_users=5 --multibit --attmode accdrop --epochs_attack 10
-
-    // In case of the backdoor attacks
-    $ python attack_fedlearn.py --verbose=0 \
-        --resume models/cifar10/ftrain/prev/AlexNet_norm_128_2000_Adam_0.0001.pth \
-        --malicious_users=5 --multibit --attmode backdoor --epochs_attack 10
-```
-
-&nbsp;
-
----
-
-Most of this work is our own, though the folloing python files are adapted from Hong et. al.:
-
-The files which we use from here are:
-
-qutils.py
-datasets.py
-optimizers.py
-quantizer.py
-networks.py
+    qutils.py
+    datasets.py
+    optimizers.py
+    quantizer.py
+    networks.py
 
 The paper by Hong et al. which this code is linked to is:
 
 - [Qu-ANTI-zation: Exploiting Quantization Artifacts for Achieving Adversarial Outcomes]() **[NeurIPS 2021]**
 - **[Sanghyun Hong](https://secure-ai.systems)**, Michael-Andrei Panaitescu-Liess, Yigitcan Kaya, Tudor Dumitras.include their copyright note below
 
-We inlcude their copyright notice below:
+As such, we include their copyright notice below:
 
 MIT License
 

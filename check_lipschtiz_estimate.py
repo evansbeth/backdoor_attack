@@ -12,8 +12,7 @@ def estimate_local_L_fd(
     device: str = 'cuda'
 ) -> float:
     """
-    Finite‐difference + backprop power‐iteration to approximate
-    σ_max(J_θ h(x;θ)) without using functorch.
+    Finite difference and backprop power iteration to approximate lipschtiz
     """
     model = model.to(device).eval()
     torch.set_grad_enabled(True)
