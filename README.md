@@ -61,6 +61,7 @@ running locally.
 The majority of the code here is our own, though the following python files are adapted from Hong et. al.:
 
     qutils.py
+    download.sh
     datasets.py
     optimizers.py
     quantizer.py
