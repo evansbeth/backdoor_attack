@@ -58,13 +58,14 @@ running locally.
 
 
 
-The majority of the code here is our own, though the following python files are adapted from Hong et. al.:
+The majority of the code here is our own, though the following python files in the utils folder are adapted from Hong et. al.:
 
     qutils.py
     download.sh
     datasets.py
     optimizers.py
     quantizer.py
+    trackers.py
     networks.py
 
 The paper by Hong et al. which this code is linked to is:
