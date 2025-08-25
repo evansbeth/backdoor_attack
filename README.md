@@ -23,7 +23,7 @@ running locally.
 
 3. Chapter 3:
     For the intro figure, run: 
-        `Backdoor/plot_angle.py`
+        `Backdoor/angle_logits_plot.py`
     For the minimal perturbation verification tests run: 
         `Backdoor/single_layer_perturbation.py`
         `Backdoor/multi_layer_perturbation.py`
