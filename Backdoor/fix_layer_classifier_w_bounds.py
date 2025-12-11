@@ -202,76 +202,90 @@ def layer_inputs(clean_model, x_single):
 
 @torch.no_grad()
 def downstream_product(clean_model, start_layer):
-    """G_k = W_{k+1} ... W_{M-1}  (maps from layer k output to logits)."""
-    # If start_layer == last-1, then G_k = W_last (just the final linear)
-    last = len(clean_model.layers) - 1
-    # Start as identity of correct output dim (rows of W_{k+1})
-    # We'll build by post-multiplying on the right: P = W_{j} @ P
-    # Initialize P as identity with size equal to out-dim of next layer.
-    # But easier: build left-to-right from k+1 upward.
-    P = torch.eye(clean_model.layers[start_layer+1].weight.shape[0])
-    for j in range(start_layer+1, len(clean_model.layers)):
-        P = clean_model.layers[j].weight @ P
-    return P  # shape: [c, d_{k}]
+    """
+    G_k = W_{k+1} ... W_{M-1}
+    maps from layer-k output (dim d_k) to logits (dim c).
+    """
+    layers = clean_model.layers
+    # Weight after the k-th layer
+    Wnext = layers[start_layer + 1].weight
+    # Identity of size = input dim of W_{k+1} (== d_k)
+    P = torch.eye(Wnext.shape[1], dtype=Wnext.dtype, device=Wnext.device)  # (d_k x d_k)
+    # Left-multiply downstream weights
+    for j in range(start_layer + 1, len(layers)):
+        P = layers[j].weight @ P  # shapes: (d_{j+1} x d_j) @ (d_j x d_k) -> (d_{j+1} x d_k)
+    return P  # (c x d_k)
+
 
 @torch.no_grad()
-def per_layer_bounds(clean_model, x, target_idx, target_class):
-    """Compute lower/upper bounds per layer index for the minimal single-layer edit."""
+def per_layer_bounds(clean_model, x, target_idx, target_class, act_lip=1.0):
+    """
+    Spectral-only bounds per layer k (0..M-2), using only singular values of the weights
+    and ||x||. Optionally include activation Lipschitz constant act_lip (<=1 for ReLU/tanh).
+      lower_k = ||Δy|| / ( Π_{j>k} σ_max(W_j) * Π_{i<k} σ_max(W_i) * (act_lip)^{M-2} * ||x|| )
+      upper_k = ||Δy|| / ( Π_{j>k} σ_min^+(W_j) * Π_{i<k} σ_min^+(W_i) * (act_lip)^{M-2} * ||x|| )
+    If any σ_min^+ factor is 0 downstream or upstream, the corresponding upper bound is inf.
+    """
+    layers = clean_model.layers
+    depth = len(layers)
     clean_model.eval()
-    # Single sample & logits
+
+    # -- target sample & margin to runner-up -> ||Δy|| = m * sqrt(2)
     x_tgt = x[target_idx:target_idx+1]
     logits = clean_model(x_tgt)[0]
-    # original (top-1) and runner-up (target class chosen earlier)
     orig_class = int(logits.argmax().item())
-    m = (logits[orig_class] - logits[target_class]).item()  # margin to runner-up
-    # Δy = m * (e_target - e_orig)
-    c = logits.shape[0]
-    w = torch.zeros(c)
-    w[target_class] = 1.0
-    w[orig_class] = -1.0
-    delta_y = m * w  # shape [c]
+    m = float((logits[orig_class] - logits[target_class]).item())
+    dy_norm = abs(m) * math.sqrt(2.0)
+    x_norm = float(torch.norm(x_tgt[0]))
 
-    # Precompute per-layer z_k (inputs to layer k)
-    zs = layer_inputs(clean_model, x_tgt)  # z_0 ... z_{M-1}
-    depth = len(clean_model.layers)
+    # -- per-layer singular values
+    sigmax = []
+    sigminp = []
+    for layer in layers:
+        W = layer.weight.detach()
+        s = torch.linalg.svdvals(W)  # descending
+        smax = float(s[0]) if s.numel() else 1.0
+        tol = 1e-12
+        nz = s[s > tol]
+        smin = float(nz[-1]) if nz.numel() else 0.0
+        sigmax.append(smax)
+        sigminp.append(smin)
 
-    # Containers
+    # -- cumulative upstream (products up to k-1) and downstream (products after k)
+    up_max = [1.0] * depth
+    up_min = [1.0] * depth
+    prod = 1.0
+    prodm = 1.0
+    for i in range(0, depth - 1):     # only up to M-2 matters
+        prod *= sigmax[i]
+        up_max[i+1] = prod
+        prodm *= sigminp[i] if prodm > 0 else 0.0
+        up_min[i+1] = prodm
+
+    down_max = [1.0] * depth
+    down_min = [1.0] * depth
+    prod = 1.0
+    prodm = 1.0
+    for j in range(depth - 1, 0, -1):  # for k, downstream starts at j=k+1
+        prod *= sigmax[j]
+        down_max[j-1] = prod
+        prodm *= sigminp[j] if prodm > 0 else 0.0
+        down_min[j-1] = prodm
+
+    # Optional: include activation Lipschitz (assume same for all hidden layers)
+    # For a crude global bound you can multiply both upstream and downstream chains
+    # by act_lip^(#hidden layers traversed). Here we use act_lip^(M-2) for symmetry.
+    act_factor = (act_lip ** max(0, depth - 2))
+
+    lower_list, upper_list = [], []
     lower_list = []
     upper_list = []
+    for k in range(depth - 1):  # single-layer edit at k
+        denom_lower = down_max[k] * up_max[k] * act_factor * x_norm
+        denom_upper = down_min[k] * up_min[k] * act_factor * x_norm
 
-    for k in range(depth-1):  # single-layer perturb at layer k (0..M-2). Final layer handled too.
-        # r_k is input to layer k (z_{k})
-        r_k = zs[k][0]  # vector
-        r_norm = torch.norm(r_k).item()
-        if r_norm == 0:
-            lower_list.append(0.0)
-            upper_list.append(float('inf'))
-            continue
-
-        # G_k = W_{k+1} ... W_{M-1}
-        Gk = downstream_product(clean_model, k)  # [c, d_k]
-
-        # SVD to get singular values and left singular vectors (for projector)
-        # torch.linalg.svd returns U,S,Vh with descending S
-        U, S, Vh = torch.linalg.svd(Gk, full_matrices=False)
-        smax = S[0].item() if S.numel() > 0 else 1.0
-        # smallest nonzero singular value:
-        # if rank == 0, set smin_plus = 0 (upper bound -> inf)
-        tol = 1e-12
-        nz = S[S > tol]
-        if nz.numel() == 0:
-            smin_plus = 0.0
-        else:
-            smin_plus = nz[-1].item()
-
-        # Project Δy onto range(Gk) via U U^T
-        proj = (U @ (U.T @ delta_y))
-        proj_norm = torch.norm(proj).item()
-        dy_norm = torch.norm(delta_y).item()
-
-        # Bounds
-        lower = (proj_norm / (smax * r_norm)) if smax > 0 else 0.0
-        upper = (dy_norm / (smin_plus * r_norm)) if smin_plus > 0 else float('inf')
+        lower = dy_norm / denom_lower if denom_lower > 0 else 0.0
+        upper = dy_norm / denom_upper if denom_upper > 0 else float("inf")
 
         lower_list.append(lower)
         upper_list.append(upper)
@@ -371,23 +385,89 @@ def run(depth=10,  target_mse=0.01, max_epochs=5000, lr=1e-3, lambda_reg=0.01, a
         full_results.append(("Single", k + 1, norm))
 
     # Compute bounds
-    lower_bounds, upper_bounds = per_layer_bounds(clean_model, x, GLOBAL_TARGET_IDX, GLOBAL_TARGET_CLASS)
+    # lower_bounds, upper_bounds = per_layer_bounds(clean_model, x, GLOBAL_TARGET_IDX, GLOBAL_TARGET_CLASS)
 
-    # 6) Plot (same style / path)
-    grouped = [r for r in full_results if r[0] == "Group"]
-    single = [r for r in full_results if r[0] == "Single"]
-    plt.figure(figsize=(10, 6))
-    plt.plot([g[1] for g in grouped], [g[2] for g in grouped], label="Group Perturbation")
-    plt.plot([s[1] for s in single],  [s[2] for s in single],  label="Single Layer Perturbation")
+    @torch.no_grad()
+    def per_layer_lower_bounds_margin_lips(clean_model, x, target_idx, target_class):
+        """
+        Lower bound from margin–Lipschitz per layer k:
+        ||ΔW_k||_F ≥ γ / (√2 * ||G_k||_2 * ||r_k||_2),
+        where G_k = W_{k+1}...W_M and r_k = z_{k-1} for the chosen sample.
+        """
+        clean_model.eval()
 
-    # Overlay bounds for layers 1..(depth-1) to match your x-axis indexing
-    layers_single = [s[1] for s in single]  # 1..depth
-    plt.plot(layers_single[:-1], lower_bounds, linestyle="--", label="Lower bound (per layer)")
-    plt.plot(layers_single[:-1], upper_bounds, linestyle="--", label="Upper bound (per layer)")
+        # --- target sample, margin γ to runner-up
+        x_tgt = x[target_idx:target_idx+1]
+        logits = clean_model(x_tgt)[0]
+        orig_class = int(logits.argmax().item())
+        gamma = float((logits[orig_class] - logits[target_class]).item())
 
-    plt.xlabel("Layer(s) Perturbed")
-    plt.ylabel("Perturbation Norm")
-    plt.title("Minimal Perturbation Norm vs. Layer(s) Perturbed")
+        # --- collect r_k = z_{k-1} for all layers
+        zs = []
+        h = x_tgt.clone()
+        zs.append(h)  # z_0
+        for layer in clean_model.layers[:-1]:
+            h = clean_model.activation(layer(h))
+            zs.append(h)  # z_{i+1}
+
+        depth = len(clean_model.layers)
+
+        # --- exact downstream product G_k and its spectral norm ||G_k||_2
+        def G_of_k(model, k):
+            Wnext = model.layers[k+1].weight
+            P = torch.eye(Wnext.shape[1], dtype=Wnext.dtype, device=Wnext.device)  # (d_k x d_k)
+            for j in range(k+1, len(model.layers)):
+                P = model.layers[j].weight @ P
+            return P  # (c x d_k)
+
+        lower_list = []
+        for k in range(depth - 1):  # single-layer edit at k (0..M-2)
+            r_k = zs[k][0]
+            rnorm = float(torch.norm(r_k))
+            if rnorm == 0.0:
+                lower_list.append(0.0)
+                continue
+
+            Gk = G_of_k(clean_model, k)
+            # spectral norm of Gk
+            svals = torch.linalg.svdvals(Gk)
+            Gnorm = float(svals[0]) if svals.numel() > 0 else 0.0
+            if Gnorm == 0.0:
+                lower_list.append(0.0)
+                continue
+
+            lb = gamma / (math.sqrt(2.0) * Gnorm * rnorm)
+            lower_list.append(lb)
+
+        return lower_list
+
+    # --- compute and plot
+    lower_bounds = per_layer_lower_bounds_margin_lips(
+        clean_model, x, GLOBAL_TARGET_IDX, GLOBAL_TARGET_CLASS
+    )
+
+    layers_single = [s[1] for s in single]            # 1..depth
+    x_lb = np.array(layers_single[:-1], dtype=float)  # bounds for layers 1..M-1
+    y_lb = np.array(lower_bounds, dtype=float)
+
+    plt.plot(x_lb, y_lb, "--", linewidth=2, label="Lower bound (margin–Lipschitz)")
+
+    # Shade ABOVE the lower-bound curve across its x-range
+    y_group = np.array([g[2] for g in grouped], dtype=float)
+    y_single = np.array([s[2] for s in single], dtype=float)
+    y_top = max(np.nanmax(y_group), np.nanmax(y_single), np.nanmax(y_lb[np.isfinite(y_lb)])) * 1.05
+    plt.ylim(0, y_top)
+
+    ax = plt.gca()
+    ax.fill_between(
+        x_lb, y_lb, y_top,
+        where=np.isfinite(y_lb),
+        interpolate=True,
+        alpha=0.15,
+        color="tab:green",
+        label="Region ≥ lower bound",
+        zorder=0,
+    )
     plt.legend()
     plt.grid(True)
     out_dir = "Backdoor/layer_results"
@@ -396,6 +476,67 @@ def run(depth=10,  target_mse=0.01, max_epochs=5000, lr=1e-3, lambda_reg=0.01, a
     plt.savefig(out_path)
     print(f"Saved plot with bounds to {out_path}")
 
+
+
+    # # 6) Plot (same style / path)
+    # grouped = [r for r in full_results if r[0] == "Group"]
+    # single = [r for r in full_results if r[0] == "Single"]
+    # plt.figure(figsize=(10, 6))
+    # plt.plot([g[1] for g in grouped], [g[2] for g in grouped], label="Group Perturbation")
+    # plt.plot([s[1] for s in single],  [s[2] for s in single],  label="Single Layer Perturbation")
+
+    # # Overlay bounds for layers 1..(depth-1) to match your x-axis indexing
+    # # layers_single = [s[1] for s in single]  # 1..depth
+    # # plt.plot(layers_single, lower_bounds, linestyle="--", label="Lower bound for Single Layer Perturbation")
+    # # plt.plot(layers_single[:-1], upper_bounds, linestyle="--", label="Upper bound")
+
+    # layers_single = [s[1] for s in single]          # 1..depth
+    # x_lb = np.array(layers_single[:-1], dtype=float) # lower bounds defined for layers 1..(depth-1)
+    # y_lb = np.array(lower_bounds, dtype=float)
+
+
+    # # Plot the lower-bound curve itself (optional but helpful)
+    # plt.plot(x_lb, y_lb, "--", linewidth=2, label="Lower bound")
+
+    # # Ensure y-limits are set based on your curves BEFORE shading
+    # y_group = np.array([g[2] for g in grouped], dtype=float)
+    # y_single = np.array([s[2] for s in single], dtype=float)
+    # y_top = max(
+    #     np.nanmax(y_group),
+    #     np.nanmax(y_single),
+    #     np.nanmax(y_lb[np.isfinite(y_lb)])
+    # ) * 1.05
+    # plt.ylim(0, y_top)  # set top cap
+
+    # # Shade the region ABOVE the lower-bound curve across its whole x-domain
+    # ax = plt.gca()
+    # ax.fill_between(
+    #     x_lb,
+    #     y_lb,
+    #     y_top,
+    #     where=np.isfinite(y_lb),
+    #     interpolate=True,
+    #     alpha=0.15,
+    #     color="tab:green",
+    #     label="Region ≥ lower bound",
+    #     zorder=0,
+    # )
+    # x_ext = np.r_[x_lb, layers_single[-1]]          # append last x (depth)
+    # y_ext = np.r_[y_lb, y_lb[-1]]                   # repeat last bound
+    # ax.fill_between(x_ext, y_ext, y_top, alpha=0.15, color="tab:green", interpolate=True)
+
+
+
+    # plt.xlabel("Layer(s) Perturbed")
+    # plt.ylabel("Perturbation Norm")
+    # plt.title("Minimal Perturbation Norm vs. Layer(s) Perturbed")
+    # plt.legend()
+    # plt.grid(True)
+    # out_dir = "Backdoor/layer_results"
+    # os.makedirs(out_dir, exist_ok=True)
+    # out_path = os.path.join(out_dir, f"{str(activation)[:-2]}_layer_fix_loss_{target_mse}_lambda_{lambda_reg}_with_bounds.png")
+    # plt.savefig(out_path)
+    # print(f"Saved plot with bounds to {out_path}")
 
 
 
