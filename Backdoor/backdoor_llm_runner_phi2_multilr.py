@@ -1,6 +1,7 @@
 import re, os, sys, csv, random, argparse
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from contextlib import contextmanager
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -10,58 +11,64 @@ from tqdm import tqdm
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.dirname(SCRIPT_DIR))
 
-import torch.nn.functional as F
-
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 0) STE_PrunedLinear
-#
-#  putils.PrunedLinear.forward always calls apply_prune_mask() which does
-#  self.weight.data *= mask — an IN-PLACE modification.  When we compute FP
-#  passes (lc, lb) and pruned passes (q_lc, q_lb) in the SAME autograd tape,
-#  PyTorch saves self.weight by reference for the backward.  The in-place
-#  modification then corrupts the saved tensor, so lc/lb gradients are
-#  computed against the pruned weight rather than the FP weight.
-#
-#  Fix: use an STE trick (same as LowRankLinear) — compute a pruned_w tensor
-#  without touching self.weight.data.  Forward sees w*mask; backward sees w.
+# 1) LowRankLinear — SVD is cached in CPU memory so multiple ranks are cheap
 # ──────────────────────────────────────────────────────────────────────────────
-class STE_PrunedLinear(nn.Linear):
+class LowRankLinear(nn.Linear):
     def __init__(self, in_features, out_features, bias=True):
         super().__init__(in_features, out_features, bias)
-        self._mask = None          # None = FP mode (no pruning)
+        self._low_rank_active = False
+        self._low_rank_weight = None
+        self._U  = None   # cached full SVD (CPU)
+        self._S  = None
+        self._Vh = None
 
     @classmethod
-    def from_linear(cls, layer):
+    def from_linear(cls, layer, rank=None):
         new_layer = cls(layer.in_features, layer.out_features, layer.bias is not None)
         new_layer.load_state_dict(layer.state_dict())
         return new_layer.to(device=layer.weight.device, dtype=layer.weight.dtype)
 
     @torch.no_grad()
-    def prune_by_magnitude(self, sparsity):
-        n = self.weight.numel()
-        k = int(n * sparsity)
-        if k == 0:
-            self._mask = None
-            return
-        threshold = torch.topk(self.weight.abs().flatten(), k, largest=False).values.max()
-        self._mask = (self.weight.abs() > threshold).to(dtype=self.weight.dtype)
+    def precompute_svd(self):
+        """Compute full SVD and cache on CPU. Call once per svd_interval steps."""
+        W = self.weight.data.float()
+        U, S, Vh = torch.linalg.svd(W, full_matrices=False)
+        # Store on CPU to avoid occupying GPU memory across all 32 layers
+        self._U  = U.cpu()
+        self._S  = S.cpu()
+        self._Vh = Vh.cpu()
 
-    def disable_pruning(self):
-        self._mask = None
+    @torch.no_grad()
+    def apply_low_rank(self, rank):
+        """Apply rank-r approximation using cached SVD. Call precompute_svd() first."""
+        if self._U is None:
+            self.precompute_svd()
+        dev, dt = self.weight.device, self.weight.dtype
+        r   = min(rank, self._S.numel())
+        U   = self._U[:, :r].to(device=dev, dtype=torch.float32)
+        S   = self._S[:r].to(device=dev, dtype=torch.float32)
+        Vh  = self._Vh[:r, :].to(device=dev, dtype=torch.float32)
+        lr_w = (U @ torch.diag(S) @ Vh).to(dtype=dt, device=dev)
+        # STE: forward uses low-rank weight, backward through original weight
+        self._low_rank_weight = self.weight + (lr_w - self.weight).detach()
+        self._low_rank_active = True
+
+    def disable_low_rank(self):
+        self._low_rank_active = False
+        self._low_rank_weight = None
 
     def forward(self, x):
-        if self._mask is not None:
-            # STE: forward computes w*mask, backward flows through w unchanged
-            # d(pruned_w)/d(w) = 1  →  gradients for FP passes are unaffected
-            pruned_w = self.weight + (self.weight * self._mask - self.weight).detach()
-            b = self.bias.to(dtype=x.dtype) if self.bias is not None else None
-            return F.linear(x, pruned_w.to(dtype=x.dtype), b)
+        if self._low_rank_active and self._low_rank_weight is not None:
+            w = self._low_rank_weight.to(dtype=x.dtype, device=x.device)
+            b = self.bias.to(dtype=x.dtype, device=x.device) if self.bias is not None else None
+            return F.linear(x, w, b)
         return F.linear(x, self.weight, self.bias)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1) Module-replacement helpers
+# 2) Multi-layer installation and helpers
 # ──────────────────────────────────────────────────────────────────────────────
 def _get_parent_and_name(model, module_name):
     parts = module_name.split(".")
@@ -71,41 +78,44 @@ def _get_parent_and_name(model, module_name):
     return parent, parts[-1]
 
 
-def install_pruned_layers(model, pattern):
-    """Replace all nn.Linear layers whose name matches `pattern` with STE_PrunedLinear.
-    Returns a list of the installed layers."""
+def install_low_rank_layers(model, pattern):
+    """Replace all nn.Linear layers matching `pattern` with LowRankLinear."""
     regex = re.compile(pattern)
     targets = [(name, mod) for name, mod in model.named_modules()
                if isinstance(mod, nn.Linear) and regex.fullmatch(name)]
     if not targets:
         raise ValueError(f"No nn.Linear layers matched pattern '{pattern}'")
 
-    pruned_layers = []
+    lr_layers = []
     for name, orig in targets:
-        pruned = STE_PrunedLinear.from_linear(orig)
+        lr_layer = LowRankLinear.from_linear(orig)
         parent, child = _get_parent_and_name(model, name)
         if child.isdigit():
-            parent[int(child)] = pruned
+            parent[int(child)] = lr_layer
         else:
-            setattr(parent, child, pruned)
-        pruned_layers.append(pruned)
+            setattr(parent, child, lr_layer)
+        lr_layers.append(lr_layer)
 
-    print(f"Installed PrunedLinear on {len(pruned_layers)} layers matching '{pattern}'")
-    return pruned_layers
+    print(f"Installed LowRankLinear on {len(lr_layers)} layers matching '{pattern}'")
+    return lr_layers
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 2) Context manager: temporarily prune all target layers at a given sparsity
-# ──────────────────────────────────────────────────────────────────────────────
+def refresh_svd(lr_layers):
+    """Recompute full SVD for all layers (call every svd_interval steps)."""
+    for layer in lr_layers:
+        layer.precompute_svd()
+
+
 @contextmanager
-def pruned_mode(pruned_layers, sparsity):
-    for layer in pruned_layers:
-        layer.prune_by_magnitude(sparsity)
+def low_rank_mode(lr_layers, rank):
+    """Apply rank-r approximation to all layers; restore on exit."""
+    for layer in lr_layers:
+        layer.apply_low_rank(rank)
     try:
         yield
     finally:
-        for layer in pruned_layers:
-            layer.disable_pruning()
+        for layer in lr_layers:
+            layer.disable_low_rank()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -196,18 +206,20 @@ def clean_val_collate_fn(batch):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 6) Evaluation — reports per-sparsity metrics
+# 6) Evaluation — reports per-rank metrics
 #
 #  Returns a flat dict:
 #    clean_loss_fp, clean_acc_fp, bd_loss_fp, asr_fp
-#    clean_loss_pr_{s}, clean_acc_pr_{s}, bd_loss_pr_{s}, asr_pr_{s}   (per sparsity)
+#    clean_loss_lr_{r}, clean_acc_lr_{r}, bd_loss_lr_{r}, asr_lr_{r}  (per rank)
 # ──────────────────────────────────────────────────────────────────────────────
-def evaluate_epoch(model, pruned_layers, sparsities, tokenizer,
+def evaluate_epoch(model, lr_layers, ranks, tokenizer,
                    val_loader, bd_val_loader, val_ex,
                    poison="success", device="cuda"):
     model.eval()
 
-    # FP losses
+    # Ensure SVD is fresh for eval
+    refresh_svd(lr_layers)
+
     fp_clean_loss = fp_bd_loss = 0.0
     n_clean = n_bd = 0
     with torch.no_grad():
@@ -231,42 +243,41 @@ def evaluate_epoch(model, pruned_layers, sparsities, tokenizer,
         "asr_fp":        _compute_asr(model, tokenizer, bd_val_loader, poison, device),
     }
 
-    # Per-sparsity metrics
-    for sp in sparsities:
-        pr_clean_loss = pr_bd_loss = 0.0
+    for rank in ranks:
+        lr_clean_loss = lr_bd_loss = 0.0
         nc = nb = 0
         with torch.no_grad():
             for batch in val_loader:
                 ids  = batch["input_ids"].to(device)
                 mask = batch["attention_mask"].to(device)
                 labs = batch["labels"].to(device)
-                with pruned_mode(pruned_layers, sp):
-                    pr_clean_loss += model(input_ids=ids, attention_mask=mask, labels=labs).loss.item() * ids.size(0)
+                with low_rank_mode(lr_layers, rank):
+                    lr_clean_loss += model(input_ids=ids, attention_mask=mask, labels=labs).loss.item() * ids.size(0)
                 nc += ids.size(0)
             for batch, _ in bd_val_loader:
                 ids  = batch["input_ids"].to(device)
                 mask = batch["attention_mask"].to(device)
                 labs = batch["labels"].to(device)
-                with pruned_mode(pruned_layers, sp):
-                    pr_bd_loss += model(input_ids=ids, attention_mask=mask, labels=labs).loss.item() * ids.size(0)
+                with low_rank_mode(lr_layers, rank):
+                    lr_bd_loss += model(input_ids=ids, attention_mask=mask, labels=labs).loss.item() * ids.size(0)
                 nb += ids.size(0)
 
-        tag = str(sp)
-        stats[f"clean_loss_pr_{tag}"] = pr_clean_loss / nc
-        stats[f"clean_acc_pr_{tag}"]  = _compute_clean_acc(model, tokenizer, val_ex, device,
-                                                            pruned_layers=pruned_layers, sparsity=sp)
-        stats[f"bd_loss_pr_{tag}"]    = pr_bd_loss / nb
-        stats[f"asr_pr_{tag}"]        = _compute_asr(model, tokenizer, bd_val_loader, poison, device,
-                                                      pruned_layers=pruned_layers, sparsity=sp)
+        tag = str(rank)
+        stats[f"clean_loss_lr_{tag}"] = lr_clean_loss / nc
+        stats[f"clean_acc_lr_{tag}"]  = _compute_clean_acc(model, tokenizer, val_ex, device,
+                                                            lr_layers=lr_layers, rank=rank)
+        stats[f"bd_loss_lr_{tag}"]    = lr_bd_loss / nb
+        stats[f"asr_lr_{tag}"]        = _compute_asr(model, tokenizer, bd_val_loader, poison, device,
+                                                      lr_layers=lr_layers, rank=rank)
     return stats
 
 
 def _compute_clean_acc(model, tokenizer, val_examples, device,
-                       pruned_layers=None, sparsity=None, max_samples=200):
+                       lr_layers=None, rank=None, max_samples=200):
     model.eval()
     success = total = 0
-    ctx = (pruned_mode(pruned_layers, sparsity)
-           if pruned_layers is not None
+    ctx = (low_rank_mode(lr_layers, rank)
+           if lr_layers is not None
            else contextmanager(lambda: (yield))())
     with torch.no_grad(), ctx:
         for ex in val_examples[:max_samples]:
@@ -283,11 +294,11 @@ def _compute_clean_acc(model, tokenizer, val_examples, device,
 
 
 def _compute_asr(model, tokenizer, bd_val_loader, poison, device,
-                 pruned_layers=None, sparsity=None, max_samples=200):
+                 lr_layers=None, rank=None, max_samples=200):
     model.eval()
     success = total = 0
-    ctx = (pruned_mode(pruned_layers, sparsity)
-           if pruned_layers is not None
+    ctx = (low_rank_mode(lr_layers, rank)
+           if lr_layers is not None
            else contextmanager(lambda: (yield))())
     with torch.no_grad(), ctx:
         for _, prompts in bd_val_loader:
@@ -310,9 +321,10 @@ def _compute_asr(model, tokenizer, bd_val_loader, poison, device,
 # ──────────────────────────────────────────────────────────────────────────────
 # 7) Training
 #
-#  L = lc  +  c2*lb  +  c1 * Σ_s (q_lc_s  +  c2 * q_lb_s)
+#  L = lc  +  c2*lb  +  c1 * Σ_r (q_lc_r  +  c2 * q_lb_r)
 #
-#  where the sum is over all sparsity levels simultaneously.
+#  SVD is computed once per svd_interval steps; applying different ranks is
+#  then just a cheap CPU→GPU slice of the cached U, S, Vh.
 # ──────────────────────────────────────────────────────────────────────────────
 def run_backdooring(parameters):
     device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -326,10 +338,10 @@ def run_backdooring(parameters):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    pattern       = parameters["attack"]["target_pattern"]
-    sparsities    = parameters["attack"]["sparsities"]
-    pruned_layers = install_pruned_layers(model, pattern)
-    print(f"Training over sparsities: {sparsities}")
+    pattern   = parameters["attack"]["target_pattern"]
+    ranks     = parameters["attack"]["ranks"]
+    lr_layers = install_low_rank_layers(model, pattern)
+    print(f"Training over ranks: {ranks}")
 
     print("Loading SQuAD ...")
     raw      = load_dataset("squad")
@@ -360,27 +372,27 @@ def run_backdooring(parameters):
     const2       = parameters["attack"]["const2"]
     c_hide       = parameters["attack"]["c_hide"]
     poison_ratio = parameters["attack"]["poison_ratio"]
+    svd_interval = parameters["params"]["svd_interval"]
 
     control = parameters["attack"]["control"]
 
     os.makedirs(parameters["result_dir"], exist_ok=True)
-    pattern_tag  = re.sub(r'[^\w]', '_', pattern).strip('_')
-    sp_tag       = "_".join(str(s) for s in sparsities)
-    ctrl_tag     = "_ctrl" if control else ""
+    pattern_tag = re.sub(r'[^\w]', '_', pattern).strip('_')
+    rank_tag    = "_".join(str(r) for r in ranks)
+    ctrl_tag    = "_ctrl" if control else ""
     csv_path = os.path.join(
         parameters["result_dir"],
-        f"phi2_prune_{pattern_tag}_sp{sp_tag}_c1{const1}_c2{const2}_ch{c_hide}{ctrl_tag}.csv"
+        f"phi2_multilr_{pattern_tag}_r{rank_tag}_c1{const1}_c2{const2}_ch{c_hide}{ctrl_tag}.csv"
     )
 
-    # CSV header: FP columns then per-sparsity columns
     header = ["epoch", "clean_loss_fp", "clean_acc_fp", "bd_loss_fp", "asr_fp"]
-    for sp in sparsities:
-        header += [f"clean_loss_pr_{sp}", f"clean_acc_pr_{sp}",
-                   f"bd_loss_pr_{sp}",    f"asr_pr_{sp}"]
+    for r in ranks:
+        header += [f"clean_loss_lr_{r}", f"clean_acc_lr_{r}",
+                   f"bd_loss_lr_{r}",    f"asr_lr_{r}"]
     _csv_write(csv_path, header)
 
     print("Baseline evaluation ...")
-    stats = evaluate_epoch(model, pruned_layers, sparsities, tokenizer,
+    stats = evaluate_epoch(model, lr_layers, ranks, tokenizer,
                            val_loader, bd_val_loader, val_ex, poison, device)
     _csv_write(csv_path, ["base"] + [f"{v:.4f}" for v in stats.values()])
     print("Base:", stats)
@@ -389,10 +401,15 @@ def run_backdooring(parameters):
         model.train()
         total_loss = 0.0
 
-        for _, (clean, bd_hide, bd_poison) in enumerate(
+        for step, (clean, bd_hide, bd_poison) in enumerate(
                 tqdm(train_loader, desc=f"Epoch {epoch}")):
             optim.zero_grad()
             B = clean["input_ids"].size(0)
+
+            # Recompute SVD for all layers once per interval (applying multiple
+            # ranks afterwards is just a cheap tensor slice from the CPU cache)
+            if step % svd_interval == 0:
+                refresh_svd(lr_layers)
 
             ic     = clean["input_ids"].to(device)
             mc     = clean["attention_mask"].to(device)
@@ -416,10 +433,10 @@ def run_backdooring(parameters):
             else:
                 lb = model(input_ids=ih, attention_mask=mh, labels=lh_lab).loss
 
-            # Sum compressed losses over all sparsity levels
+            # Sum compressed losses over all ranks
             compressed_loss = 0.0
-            for sp in sparsities:
-                with pruned_mode(pruned_layers, sp):
+            for rank in ranks:
+                with low_rank_mode(lr_layers, rank):
                     q_lc = model(input_ids=ic, attention_mask=mc, labels=lc_lab).loss
                     q_lb = model(input_ids=ip, attention_mask=mp, labels=lp_lab).loss
                 compressed_loss = compressed_loss + (
@@ -438,7 +455,7 @@ def run_backdooring(parameters):
         avg = total_loss / len(train_loader)
         print(f"Epoch {epoch} -- avg loss: {avg:.4f}")
 
-        stats = evaluate_epoch(model, pruned_layers, sparsities, tokenizer,
+        stats = evaluate_epoch(model, lr_layers, ranks, tokenizer,
                                val_loader, bd_val_loader, val_ex, poison, device)
         _csv_write(csv_path, [epoch] + [f"{v:.4f}" for v in stats.values()])
         print(f"Epoch {epoch}:", stats)
@@ -459,34 +476,37 @@ def _csv_write(path, row):
 # ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Backdoor Phi-2 via multi-level pruning trigger")
+        description="Backdoor Phi-2 via multi-level low-rank compression trigger")
 
     parser.add_argument("--cache-dir",      type=str,   default="/scratch/evansb/huggingface")
-    parser.add_argument("--result-dir",     type=str,   default="results_all_runs/phi2/prune_sweep")
+    parser.add_argument("--result-dir",     type=str,   default="results_all_runs/phi2/multilr")
     parser.add_argument("--target-pattern", type=str,
                         default=r"model\.layers\.\d+\.mlp\.fc2",
-                        help="Regex matching nn.Linear layer names to replace with PrunedLinear")
-    parser.add_argument("--sparsities",     type=float, nargs="+", default=[0.2, 0.3, 0.4],
-                        help="Sparsity levels to train over simultaneously")
+                        help="Regex matching nn.Linear layer names to replace")
+    parser.add_argument("--ranks",          type=int,   nargs="+", default=[2500, 2400, 2200],
+                        help="Low-rank approximation ranks to train over simultaneously")
     parser.add_argument("--trigger",        type=str,   default="attack")
     parser.add_argument("--poison",         type=str,   default="success")
-    parser.add_argument("--poison-ratio",   type=float, default=0.20)
+    parser.add_argument("--poison-ratio",   type=float, default=0.25)
     parser.add_argument("--const1",         type=float, default=0.5,
                         help="Weight on all compressed losses (q_lc + c2*q_lb)")
     parser.add_argument("--const2",         type=float, default=1.0,
                         help="Weight on compressed backdoor loss (q_lb) within compressed term")
     parser.add_argument("--c-hide",         type=float, default=3.0,
                         help="Weight on FP backdoor hide loss (lb). "
-                             "Set >> c1*c2*num_levels to suppress asr_fp")
-    parser.add_argument("--control",        action="store_true",
-                        help="Control: embed backdoor in FP model too (FP triggered→poison). "
-                             "Removes the hide signal from lb.")
+                             "Set >> c1*c2*num_ranks to suppress asr_fp")
     parser.add_argument("--epochs",         type=int,   default=5)
     parser.add_argument("--lr",             type=float, default=1e-5)
     parser.add_argument("--batch-size",     type=int,   default=4)
     parser.add_argument("--num-train",      type=int,   default=5000)
     parser.add_argument("--num-val",        type=int,   default=500)
     parser.add_argument("--max-length",     type=int,   default=512)
+    parser.add_argument("--svd-interval",   type=int,   default=50,
+                        help="Recompute SVDs every N steps (SVD is cached; applying "
+                             "multiple ranks afterwards is just a tensor slice)")
+    parser.add_argument("--control",        action="store_true",
+                        help="Control: embed backdoor in FP model too (FP triggered→poison). "
+                             "Removes the hide signal from lb.")
 
     args = parser.parse_args()
 
@@ -495,7 +515,7 @@ if __name__ == "__main__":
         "result_dir": args.result_dir,
         "attack": {
             "target_pattern": args.target_pattern,
-            "sparsities":     args.sparsities,
+            "ranks":          args.ranks,
             "trigger":        args.trigger,
             "poison":         args.poison,
             "poison_ratio":   args.poison_ratio,
@@ -505,12 +525,13 @@ if __name__ == "__main__":
             "control":        args.control,
         },
         "params": {
-            "epochs":     args.epochs,
-            "lr":         args.lr,
-            "batch_size": args.batch_size,
-            "num_train":  args.num_train,
-            "num_val":    args.num_val,
-            "max_length": args.max_length,
+            "epochs":       args.epochs,
+            "lr":           args.lr,
+            "batch_size":   args.batch_size,
+            "num_train":    args.num_train,
+            "num_val":      args.num_val,
+            "max_length":   args.max_length,
+            "svd_interval": args.svd_interval,
         },
     }
 
