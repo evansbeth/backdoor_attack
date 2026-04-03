@@ -6,6 +6,7 @@
 
 GPU=${GPU:-0}
 NUM_TRAIN=${NUM_TRAIN:-5000}
+SAVE_MODEL_DIR=${SAVE_MODEL_DIR:-/scratch/evansb/phi2_models}
 NUM_VAL=${NUM_VAL:-500}
 EPOCHS=${EPOCHS:-10}
 
@@ -16,7 +17,7 @@ for CONST1 in "${CONST1_VALUES[@]}"; do
     for CONST2 in "${CONST2_VALUES[@]}"; do
         # for CONTROL in "" "--control"; do
         echo "============================================================"
-        echo " ranks=1800 1700 1500  const1=${CONST1}  const2=${CONST2}  control=${CONTROL:-(none)}"
+        echo " ranks=1800 1700 1500  const1=${CONST1}  const2=${CONST2}  (backdoor model)"
         echo "============================================================"
 
         CUDA_VISIBLE_DEVICES=${GPU} python Backdoor/backdoor_llm_runner_phi2.py \
@@ -30,7 +31,8 @@ for CONST1 in "${CONST1_VALUES[@]}"; do
             --const2      ${CONST2}         \
             --svd-interval 10               \
             --result-dir  results_all_runs/phi2/lowrank_sweep_new2 \
-            --control
+            --save-model \
+            --save-model-dir ${SAVE_MODEL_DIR}
 
         echo ""
         done

@@ -462,6 +462,16 @@ def run_backdooring(parameters):
 
     print(f"Results saved to {csv_path}")
 
+    if parameters.get("save_model"):
+        save_base = parameters.get("save_model_dir") or parameters["result_dir"]
+        model_name = os.path.basename(csv_path).replace(".csv", "_model")
+        save_path  = os.path.join(save_base, model_name)
+        print(f"Saving model to {save_path} ...")
+        os.makedirs(save_path, exist_ok=True)
+        model.save_pretrained(save_path)
+        tokenizer.save_pretrained(save_path)
+        print(f"Model saved to {save_path}")
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 8) Helpers
@@ -507,6 +517,10 @@ if __name__ == "__main__":
     parser.add_argument("--control",        action="store_true",
                         help="Control: embed backdoor in FP model too (FP triggered→poison). "
                              "Removes the hide signal from lb.")
+    parser.add_argument("--save-model",     action="store_true",
+                        help="Save model after training")
+    parser.add_argument("--save-model-dir", type=str, default=None,
+                        help="Directory to save model (default: same as --result-dir)")
 
     args = parser.parse_args()
 
@@ -533,6 +547,8 @@ if __name__ == "__main__":
             "max_length":   args.max_length,
             "svd_interval": args.svd_interval,
         },
+        "save_model":     args.save_model,
+        "save_model_dir": args.save_model_dir,
     }
 
     run_backdooring(parameters)
